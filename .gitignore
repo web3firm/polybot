@@ -1,0 +1,46 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Binaries
+polybot
+polybot.exe
+/bin/
+/dist/
+
+# Build artifacts
+*.o
+*.a
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+go.work
+
+# Logs
+*.log
+logs/
+
+# Secrets - NEVER COMMIT
+*.pem
+*.key
+private_key*
+wallet*key*
