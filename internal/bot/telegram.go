@@ -238,7 +238,7 @@ Need help? Join our community!`
 
 func (b *Bot) cmdStatus(chatID int64) {
 	opps := b.scanner.GetOpportunities()
-	
+
 	settings, _ := b.db.GetUserSettings(chatID)
 	alertStatus := "🟢 Enabled"
 	if !settings.AlertsEnabled {
@@ -305,11 +305,14 @@ _I'll alert you when opportunities appear!_`
 			break
 		}
 
-		emoji := "🟢"
-		if opp.Type == scanner.TypeOverpriced {
+		var emoji string
+		switch t := opp.Type; t {
+		case scanner.TypeOverpriced:
 			emoji = "🟡"
-		} else if opp.Type == scanner.TypeSevereMispricing {
+		case scanner.TypeSevereMispricing:
 			emoji = "🔴"
+		default:
+			emoji = "🟢"
 		}
 
 		question := opp.Market.Question
@@ -320,7 +323,7 @@ _I'll alert you when opportunities appear!_`
 		text += fmt.Sprintf(`%s *%s*
    YES: $%s | NO: $%s | Spread: %s%%
 
-`, emoji, escapeMarkdown(question), 
+`, emoji, escapeMarkdown(question),
 			opp.YesPrice.StringFixed(3),
 			opp.NoPrice.StringFixed(3),
 			opp.SpreadPct.StringFixed(2))
@@ -337,7 +340,7 @@ _I'll alert you when opportunities appear!_`
 
 func (b *Bot) cmdStats(chatID int64) {
 	stats, _ := b.db.GetStats()
-	
+
 	text := fmt.Sprintf(`📈 *Statistics*
 
 *All Time:*
@@ -431,7 +434,7 @@ func (b *Bot) toggleAlerts(chatID int64) {
 
 func (b *Bot) setMinSpread(chatID int64, spread string) {
 	settings, _ := b.db.GetUserSettings(chatID)
-	
+
 	if s, err := decimal.NewFromString(spread); err == nil {
 		settings.MinSpreadPct = s
 		b.db.SaveUserSettings(settings)
@@ -442,16 +445,20 @@ func (b *Bot) setMinSpread(chatID int64, spread string) {
 // Alert sending
 
 func (b *Bot) sendOpportunityAlert(chatID int64, opp scanner.Opportunity) error {
-	emoji := "🟢"
-	action := "BUY BOTH for guaranteed profit"
-	
-	switch opp.Type {
+	var (
+		emoji  string
+		action string
+	)
+	switch t := opp.Type; t {
 	case scanner.TypeOverpriced:
 		emoji = "🟡"
 		action = "Prices inflated - wait or short"
 	case scanner.TypeSevereMispricing:
 		emoji = "🔴"
 		action = "SEVERE mispricing detected!"
+	default:
+		emoji = "🟢"
+		action = "BUY BOTH for guaranteed profit"
 	}
 
 	question := opp.Market.Question

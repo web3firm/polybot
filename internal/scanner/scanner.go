@@ -16,8 +16,8 @@ import (
 type OpportunityType string
 
 const (
-	TypeUnderpriced    OpportunityType = "underpriced"
-	TypeOverpriced     OpportunityType = "overpriced"
+	TypeUnderpriced      OpportunityType = "underpriced"
+	TypeOverpriced       OpportunityType = "overpriced"
 	TypeSevereMispricing OpportunityType = "severe_mispricing"
 )
 
@@ -37,15 +37,15 @@ type Scanner struct {
 	db            *database.Database
 	client        *polymarket.Client
 	tradingEngine *trading.Engine
-	
+
 	opportunities []Opportunity
 	mu            sync.RWMutex
-	
-	subscribers   []chan Opportunity
-	subMu         sync.RWMutex
-	
-	stopCh        chan struct{}
-	running       bool
+
+	subscribers []chan Opportunity
+	subMu       sync.RWMutex
+
+	stopCh  chan struct{}
+	running bool
 }
 
 func New(cfg *config.Config, db *database.Database, engine *trading.Engine) *Scanner {
@@ -94,7 +94,7 @@ func (s *Scanner) Stop() {
 func (s *Scanner) Subscribe() chan Opportunity {
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
-	
+
 	ch := make(chan Opportunity, 100)
 	s.subscribers = append(s.subscribers, ch)
 	return ch
@@ -103,21 +103,26 @@ func (s *Scanner) Subscribe() chan Opportunity {
 func (s *Scanner) GetOpportunities() []Opportunity {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	result := make([]Opportunity, len(s.opportunities))
 	copy(result, s.opportunities)
 	return result
 }
 
 func (s *Scanner) scan() {
-	markets, err := s.client.GetMarkets(s.cfg.MaxMarketsToScan)
+	// Use new paginated, rate-limited fetch
+	markets, err := s.client.GetAllMarkets(
+		s.cfg.PolymarketBatchSize,
+		s.cfg.MaxMarketsToScan,
+		s.cfg.PolymarketMaxRPS,
+	)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to fetch markets")
 		return
 	}
 
 	opportunities := s.findOpportunities(markets)
-	
+
 	s.mu.Lock()
 	s.opportunities = opportunities
 	s.mu.Unlock()
@@ -159,14 +164,14 @@ func (s *Scanner) findOpportunities(markets []polymarket.ParsedMarket) []Opportu
 		}
 
 		var oppType OpportunityType
-		
+
 		// Determine opportunity type
 		if totalPrice.LessThan(one) {
 			oppType = TypeUnderpriced // Buy both for guaranteed profit
 		} else if totalPrice.GreaterThan(decimal.NewFromFloat(1.02)) {
 			oppType = TypeOverpriced
 		}
-		
+
 		if totalPrice.GreaterThan(decimal.NewFromFloat(1.10)) {
 			oppType = TypeSevereMispricing
 		}

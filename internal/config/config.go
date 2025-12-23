@@ -19,16 +19,18 @@ type Config struct {
 	TelegramChatID int64
 
 	// Scanner Settings
-	ScanInterval    time.Duration
-	MinSpreadPct    decimal.Decimal
-	AlertCooldown   time.Duration
-	MaxMarketsToScan int
+	ScanInterval        time.Duration
+	MinSpreadPct        decimal.Decimal
+	AlertCooldown       time.Duration
+	MaxMarketsToScan    int
+	PolymarketBatchSize int
+	PolymarketMaxRPS    int
 
 	// Trading Settings (for future auto-trading)
-	TradingEnabled  bool
-	MaxTradeSize    decimal.Decimal
-	MinProfitPct    decimal.Decimal
-	DryRun          bool
+	TradingEnabled bool
+	MaxTradeSize   decimal.Decimal
+	MinProfitPct   decimal.Decimal
+	DryRun         bool
 
 	// Polymarket
 	PolymarketAPIURL string
@@ -45,22 +47,24 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		// Defaults
-		Mode:             getEnv("BOT_MODE", "alerts"),
-		Debug:            getEnvBool("DEBUG", false),
-		TelegramToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
-		ScanInterval:     getEnvDuration("SCAN_INTERVAL", 30*time.Second),
-		MinSpreadPct:     getEnvDecimal("MIN_SPREAD_PCT", decimal.NewFromFloat(1.0)),
-		AlertCooldown:    getEnvDuration("ALERT_COOLDOWN", 5*time.Minute),
-		MaxMarketsToScan: getEnvInt("MAX_MARKETS", 200),
-		TradingEnabled:   getEnvBool("TRADING_ENABLED", false),
-		MaxTradeSize:     getEnvDecimal("MAX_TRADE_SIZE", decimal.NewFromFloat(100)),
-		MinProfitPct:     getEnvDecimal("MIN_PROFIT_PCT", decimal.NewFromFloat(2.0)),
-		DryRun:           getEnvBool("DRY_RUN", true),
-		PolymarketAPIURL: getEnv("POLYMARKET_API_URL", "https://gamma-api.polymarket.com"),
-		PolymarketWSURL:  getEnv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws"),
-		DatabasePath:     getEnv("DATABASE_PATH", "data/polybot.db"),
-		WalletPrivateKey: os.Getenv("WALLET_PRIVATE_KEY"),
-		WalletAddress:    os.Getenv("WALLET_ADDRESS"),
+		Mode:                getEnv("BOT_MODE", "alerts"),
+		Debug:               getEnvBool("DEBUG", false),
+		TelegramToken:       os.Getenv("TELEGRAM_BOT_TOKEN"),
+		ScanInterval:        getEnvDuration("SCAN_INTERVAL", 30*time.Second),
+		MinSpreadPct:        getEnvDecimal("MIN_SPREAD_PCT", decimal.NewFromFloat(1.0)),
+		AlertCooldown:       getEnvDuration("ALERT_COOLDOWN", 5*time.Minute),
+		MaxMarketsToScan:    getEnvInt("MAX_MARKETS", 200),
+		PolymarketBatchSize: getEnvInt("POLYMARKET_BATCH_SIZE", 1000),
+		PolymarketMaxRPS:    getEnvInt("POLYMARKET_MAX_RPS", 5),
+		TradingEnabled:      getEnvBool("TRADING_ENABLED", false),
+		MaxTradeSize:        getEnvDecimal("MAX_TRADE_SIZE", decimal.NewFromFloat(100)),
+		MinProfitPct:        getEnvDecimal("MIN_PROFIT_PCT", decimal.NewFromFloat(2.0)),
+		DryRun:              getEnvBool("DRY_RUN", true),
+		PolymarketAPIURL:    getEnv("POLYMARKET_API_URL", "https://gamma-api.polymarket.com"),
+		PolymarketWSURL:     getEnv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws"),
+		DatabasePath:        getEnv("DATABASE_PATH", "data/polybot.db"),
+		WalletPrivateKey:    os.Getenv("WALLET_PRIVATE_KEY"),
+		WalletAddress:       os.Getenv("WALLET_ADDRESS"),
 	}
 
 	// Parse chat ID

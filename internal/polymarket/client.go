@@ -16,31 +16,31 @@ type Client struct {
 }
 
 type Market struct {
-	ID             string `json:"id"`
-	Question       string `json:"question"`
-	Slug           string `json:"slug"`
-	Active         bool   `json:"active"`
-	Closed         bool   `json:"closed"`
-	Volume         string `json:"volume"`
-	OutcomePrices  string `json:"outcomePrices"`
-	Outcomes       string `json:"outcomes"`
-	ConditionID    string `json:"conditionId"`
-	EndDate        string `json:"endDateIso"`
-	Description    string `json:"description"`
+	ID                 string `json:"id"`
+	Question           string `json:"question"`
+	Slug               string `json:"slug"`
+	Active             bool   `json:"active"`
+	Closed             bool   `json:"closed"`
+	Volume             string `json:"volume"`
+	OutcomePrices      string `json:"outcomePrices"`
+	Outcomes           string `json:"outcomes"`
+	ConditionID        string `json:"conditionId"`
+	EndDate            string `json:"endDateIso"`
+	Description        string `json:"description"`
 	MarketMakerAddress string `json:"marketMakerAddress"`
 }
 
 type ParsedMarket struct {
-	ID        string
-	Question  string
-	Slug      string
-	Active    bool
-	Closed    bool
-	Volume    decimal.Decimal
-	YesPrice  decimal.Decimal
-	NoPrice   decimal.Decimal
-	Outcomes  []string
-	EndDate   time.Time
+	ID       string
+	Question string
+	Slug     string
+	Active   bool
+	Closed   bool
+	Volume   decimal.Decimal
+	YesPrice decimal.Decimal
+	NoPrice  decimal.Decimal
+	Outcomes []string
+	EndDate  time.Time
 }
 
 type OrderBook struct {
@@ -57,9 +57,14 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+// GetMarkets fetches a single page of markets (for backward compatibility)
 func (c *Client) GetMarkets(limit int) ([]ParsedMarket, error) {
-	url := fmt.Sprintf("%s/markets?closed=false&active=true&limit=%d", c.baseURL, limit)
-	
+	return c.GetMarketsWithOffset(limit, 0)
+}
+
+// GetMarketsWithOffset fetches a single page of markets with offset
+func (c *Client) GetMarketsWithOffset(limit, offset int) ([]ParsedMarket, error) {
+	url := fmt.Sprintf("%s/markets?closed=false&active=true&limit=%d&offset=%d", c.baseURL, limit, offset)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch markets: %w", err)
@@ -89,9 +94,46 @@ func (c *Client) GetMarkets(limit int) ([]ParsedMarket, error) {
 	return parsed, nil
 }
 
+// GetAllMarkets fetches all markets using pagination, with optional rate limiting
+func (c *Client) GetAllMarkets(batchSize, maxMarkets, maxRPS int) ([]ParsedMarket, error) {
+	var all []ParsedMarket
+	offset := 0
+	for {
+		// Respect maxMarkets if set
+		toFetch := batchSize
+		if maxMarkets > 0 && len(all)+batchSize > maxMarkets {
+			toFetch = maxMarkets - len(all)
+		}
+		if toFetch <= 0 {
+			break
+		}
+
+		batch, err := c.GetMarketsWithOffset(toFetch, offset)
+		if err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		all = append(all, batch...)
+		offset += len(batch)
+
+		// If we got less than requested, we're done
+		if len(batch) < toFetch {
+			break
+		}
+
+		// Rate limiting
+		if maxRPS > 0 {
+			time.Sleep(time.Second / time.Duration(maxRPS))
+		}
+	}
+	return all, nil
+}
+
 func (c *Client) GetMarket(conditionID string) (*ParsedMarket, error) {
 	url := fmt.Sprintf("%s/markets/%s", c.baseURL, conditionID)
-	
+
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, err
@@ -129,7 +171,7 @@ func (c *Client) parseMarket(m Market) (*ParsedMarket, error) {
 		if err := json.Unmarshal([]byte(m.OutcomePrices), &prices); err != nil {
 			return nil, fmt.Errorf("failed to parse outcome prices: %w", err)
 		}
-		
+
 		if len(prices) >= 2 {
 			if yes, err := decimal.NewFromString(prices[0]); err == nil {
 				pm.YesPrice = yes
@@ -161,7 +203,7 @@ func (c *Client) parseMarket(m Market) (*ParsedMarket, error) {
 // GetOrderBook fetches the order book for a market (for future trading)
 func (c *Client) GetOrderBook(tokenID string) (*OrderBook, error) {
 	url := fmt.Sprintf("https://clob.polymarket.com/book?token_id=%s", tokenID)
-	
+
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
 		return nil, err

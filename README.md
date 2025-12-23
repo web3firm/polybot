@@ -118,6 +118,9 @@ polybot/
 | `SCAN_INTERVAL` | `30s` | How often to scan markets |
 | `MIN_SPREAD_PCT` | `2` | Minimum spread % for alerts |
 | `ALERT_COOLDOWN` | `5m` | Cooldown between repeat alerts |
+| `MAX_MARKETS` | `0` | Max number of markets to scan (0 = unlimited) |
+| `POLYMARKET_BATCH_SIZE` | `1000` | Polymarket API batch size per request |
+| `POLYMARKET_MAX_RPS` | `5` | Max Polymarket API requests per second |
 | `TRADING_ENABLED` | `false` | Enable auto-trading |
 | `DRY_RUN` | `true` | Simulate trades without executing |
 
