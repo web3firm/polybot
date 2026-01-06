@@ -1,233 +1,160 @@
 package config
 
 import (
-	"fmt"
-	"os"
-	"strconv"
-	"strings"
-	"time"
+"fmt"
+"os"
+"strconv"
+"time"
 
-	"github.com/shopspring/decimal"
+"github.com/shopspring/decimal"
 )
 
-// MarketConfig defines a single market to trade
-type MarketConfig struct {
-	ID            string        `json:"id"`
-	Asset         string        `json:"asset"`
-	Timeframe     time.Duration `json:"timeframe"`
-	Strategy      string        `json:"strategy"`
-	MaxBet        float64       `json:"max_bet"`
-	Enabled       bool          `json:"enabled"`
-	MinConfidence float64       `json:"min_confidence,omitempty"`
-	MinOdds       float64       `json:"min_odds,omitempty"`
-	MaxOdds       float64       `json:"max_odds,omitempty"`
-}
-
-// RiskConfig defines risk management parameters
-type RiskConfig struct {
-	MaxBetSize       decimal.Decimal `json:"max_bet_size"`
-	MaxDailyLoss     decimal.Decimal `json:"max_daily_loss"`
-	MaxDailyTrades   int             `json:"max_daily_trades"`
-	MaxDailyExposure decimal.Decimal `json:"max_daily_exposure"`
-	MinConfidence    float64         `json:"min_confidence"`
-	MinLiquidity     decimal.Decimal `json:"min_liquidity"`
-	TradeCooldown    time.Duration   `json:"trade_cooldown"`
-	ChopFilter       bool            `json:"chop_filter"`
-	ChopThreshold    float64         `json:"chop_threshold"`
-}
-
+// Config holds all configuration for the bot
 type Config struct {
-	// Bot Settings
-	Mode  string // "prediction" mode
-	Debug bool
+// Telegram
+TelegramToken  string
+TelegramChatID int64
 
-	// Telegram
-	TelegramToken  string
-	TelegramChatID int64
+// Trading Asset
+TradingAsset string
 
-	// Alert Settings
-	AlertCooldown time.Duration
+// Mode
+DryRun bool
+Debug  bool
 
-	// Polymarket API Settings
-	PolymarketBatchSize int
-	PolymarketMaxRPS    int
+// Polymarket API
+PolymarketAPIURL  string
+PolymarketCLOBURL string
 
-	// Trading Settings (for future auto-trading)
-	TradingEnabled bool
-	MaxTradeSize   decimal.Decimal
-	MinProfitPct   decimal.Decimal
-	DryRun         bool
+// CLOB Credentials
+CLOBApiKey     string
+CLOBApiSecret  string
+CLOBPassphrase string
 
-	// Polymarket
-	PolymarketAPIURL string
-	PolymarketWSURL  string
-	PolymarketCLOBURL string
+// Wallet
+WalletPrivateKey string
+WalletAddress    string
+SignerAddress    string // Address that signed/derived the API credentials
+FunderAddress    string // Address that holds funds (may differ from signing key)
+SignatureType    int    // 0=EOA, 1=Magic/Email, 2=Proxy
 
-	// Database
-	DatabasePath string
+// Arbitrage Settings
+ArbEnabled         bool
+ArbMinPriceMove    decimal.Decimal // e.g., 0.002 = 0.2%
+ArbMaxOddsForEntry decimal.Decimal // e.g., 0.65 = 65 cents
+ArbMinEdge         decimal.Decimal // e.g., 0.10 = 10%
+ArbPositionSize    decimal.Decimal // USD per trade
+ArbMaxDailyTrades  int
+ArbCooldownSeconds int
 
-	// Wallet (for future trading)
-	WalletPrivateKey string
-	WalletAddress    string
-	
-	// Bankroll for risk management
-	Bankroll decimal.Decimal
-	
-	// Risk Management
-	Risk RiskConfig
-	
-	// Markets to trade (config-driven)
-	Markets []MarketConfig
-	
-	// BTC Prediction Settings (legacy - use Markets instead)
-	// TODO: Deprecated - migrate to Markets[] config
-	BTCEnabled        bool
-	BTCMinSignalScore int              // Minimum score to trigger trade (-100 to 100)
-	BTCMinConfidence  float64          // Minimum confidence percentage
-	BTCMaxBetSize     decimal.Decimal  // Max bet per trade
-	BTCMinOdds        decimal.Decimal  // Minimum odds to bet (e.g., 0.40 = 40%)
-	BTCMaxOdds        decimal.Decimal  // Maximum odds to bet (e.g., 0.65 = 65%)
-	BTCCooldown       time.Duration    // Cooldown between trades
-	BTCAutoTrade      bool             // Enable automatic trading
-	BTCAlertOnly      bool             // Only send alerts, don't trade
-	
-	// Primary trading asset (configurable via env)
-	// Use TRADING_ASSET env var to set (default: BTC)
-	// Supports: BTC, ETH, SOL, etc.
-	TradingAsset string
+// Risk
+MaxDailyLoss decimal.Decimal
+Bankroll     decimal.Decimal
+
+// Database
+DatabasePath string
 }
 
+// Load loads configuration from environment variables
 func Load() (*Config, error) {
-	cfg := &Config{
-		// Defaults
-		Mode:                getEnv("BOT_MODE", "prediction"),
-		Debug:               getEnvBool("DEBUG", false),
-		TelegramToken:       os.Getenv("TELEGRAM_BOT_TOKEN"),
-		AlertCooldown:       getEnvDuration("ALERT_COOLDOWN", 5*time.Minute),
-		PolymarketBatchSize: getEnvInt("POLYMARKET_BATCH_SIZE", 1000),
-		PolymarketMaxRPS:    getEnvInt("POLYMARKET_MAX_RPS", 5),
-		TradingEnabled:      getEnvBool("TRADING_ENABLED", false),
-		MaxTradeSize:        getEnvDecimal("MAX_TRADE_SIZE", decimal.NewFromFloat(100)),
-		DryRun:              getEnvBool("DRY_RUN", true),
-		PolymarketAPIURL:    getEnv("POLYMARKET_API_URL", "https://gamma-api.polymarket.com"),
-		PolymarketWSURL:     getEnv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws"),
-		PolymarketCLOBURL:   getEnv("POLYMARKET_CLOB_URL", "https://clob.polymarket.com"),
-		DatabasePath:        getEnv("DATABASE_PATH", "data/polybot.db"),
-		WalletPrivateKey:    os.Getenv("WALLET_PRIVATE_KEY"),
-		WalletAddress:       os.Getenv("WALLET_ADDRESS"),
-		
-		// Bankroll
-		Bankroll:          getEnvDecimal("BANKROLL", decimal.NewFromFloat(100)),
-		
-		// Risk Management
-		Risk: RiskConfig{
-			MaxBetSize:       getEnvDecimal("RISK_MAX_BET_SIZE", decimal.NewFromFloat(10)),
-			MaxDailyLoss:     getEnvDecimal("RISK_MAX_DAILY_LOSS", decimal.NewFromFloat(50)),
-			MaxDailyTrades:   getEnvInt("RISK_MAX_DAILY_TRADES", 20),
-			MaxDailyExposure: getEnvDecimal("RISK_MAX_DAILY_EXPOSURE", decimal.NewFromFloat(100)),
-			MinConfidence:    getEnvFloat("RISK_MIN_CONFIDENCE", 0.60),
-			MinLiquidity:     getEnvDecimal("RISK_MIN_LIQUIDITY", decimal.NewFromFloat(1000)),
-			TradeCooldown:    getEnvDuration("RISK_TRADE_COOLDOWN", 30*time.Second),
-			ChopFilter:       getEnvBool("RISK_CHOP_FILTER", true),
-			ChopThreshold:    getEnvFloat("RISK_CHOP_THRESHOLD", 25.0),
-		},
-		
-		// Prediction Settings
-		BTCEnabled:        getEnvBool("BTC_ENABLED", true),
-		BTCMinSignalScore: getEnvInt("BTC_MIN_SIGNAL_SCORE", 25),
-		BTCMinConfidence:  getEnvFloat("BTC_MIN_CONFIDENCE", 25.0),
-		BTCMaxBetSize:     getEnvDecimal("BTC_MAX_BET_SIZE", decimal.NewFromFloat(50)),
-		BTCMinOdds:        getEnvDecimal("BTC_MIN_ODDS", decimal.NewFromFloat(0.35)),
-		BTCMaxOdds:        getEnvDecimal("BTC_MAX_ODDS", decimal.NewFromFloat(0.65)),
-		BTCCooldown:       getEnvDuration("BTC_COOLDOWN", 2*time.Minute),
-		BTCAutoTrade:      getEnvBool("BTC_AUTO_TRADE", false),
-		BTCAlertOnly:      getEnvBool("BTC_ALERT_ONLY", true),
-		
-		// Primary trading asset (configurable)
-		TradingAsset:      getEnv("TRADING_ASSET", "BTC"),
-	}
-	
-	// Default markets using configured asset
-	if cfg.BTCEnabled {
-		asset := cfg.TradingAsset
-		cfg.Markets = []MarketConfig{
-			{
-				ID:            fmt.Sprintf("%s_15m", strings.ToLower(asset)),
-				Asset:         asset,
-				Timeframe:     15 * time.Minute,
-				Strategy:      "crypto_15m",
-				MaxBet:        cfg.BTCMaxBetSize.InexactFloat64(),
-				Enabled:       true,
-				MinConfidence: 0.60,
-				MinOdds:       cfg.BTCMinOdds.InexactFloat64(),
-				MaxOdds:       cfg.BTCMaxOdds.InexactFloat64(),
-			},
-		}
-	}
+cfg := &Config{
+// Telegram
+TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 
-	// Parse chat ID
-	if chatID := os.Getenv("TELEGRAM_CHAT_ID"); chatID != "" {
-		id, err := strconv.ParseInt(chatID, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid TELEGRAM_CHAT_ID: %w", err)
-		}
-		cfg.TelegramChatID = id
-	}
+// Trading
+TradingAsset: getEnv("TRADING_ASSET", "BTC"),
+DryRun:       getEnvBool("DRY_RUN", true),
+Debug:        getEnvBool("DEBUG", false),
 
-	// Validate required fields
-	if cfg.TelegramToken == "" {
-		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
-	}
+// Polymarket API
+PolymarketAPIURL:  getEnv("POLYMARKET_API_URL", "https://gamma-api.polymarket.com"),
+PolymarketCLOBURL: getEnv("POLYMARKET_CLOB_URL", "https://clob.polymarket.com"),
 
-	return cfg, nil
+// CLOB Credentials
+CLOBApiKey:     os.Getenv("CLOB_API_KEY"),
+CLOBApiSecret:  os.Getenv("CLOB_API_SECRET"),
+CLOBPassphrase: os.Getenv("CLOB_PASSPHRASE"),
+
+// Wallet
+WalletPrivateKey: os.Getenv("WALLET_PRIVATE_KEY"),
+WalletAddress:    os.Getenv("WALLET_ADDRESS"),
+SignerAddress:    os.Getenv("SIGNER_ADDRESS"),
+FunderAddress:    os.Getenv("FUNDER_ADDRESS"),
+SignatureType:    getEnvInt("SIGNATURE_TYPE", 0),
+
+// Arbitrage Settings
+ArbEnabled:         getEnvBool("ARB_ENABLED", true),
+ArbMinPriceMove:    getEnvDecimal("ARB_MIN_PRICE_MOVE", decimal.NewFromFloat(0.002)),
+ArbMaxOddsForEntry: getEnvDecimal("ARB_MAX_ODDS", decimal.NewFromFloat(0.65)),
+ArbMinEdge:         getEnvDecimal("ARB_MIN_EDGE", decimal.NewFromFloat(0.10)),
+ArbPositionSize:    getEnvDecimal("ARB_POSITION_SIZE", decimal.NewFromFloat(1)),
+ArbMaxDailyTrades:  getEnvInt("ARB_MAX_DAILY_TRADES", 200),
+ArbCooldownSeconds: getEnvInt("ARB_COOLDOWN_SECONDS", 10),
+
+// Risk
+MaxDailyLoss: getEnvDecimal("MAX_DAILY_LOSS", decimal.NewFromFloat(100)),
+Bankroll:     getEnvDecimal("BANKROLL", decimal.NewFromFloat(1000)),
+
+// Database
+DatabasePath: getEnv("DATABASE_PATH", "data/polybot.db"),
 }
+
+// Parse chat ID
+if chatID := os.Getenv("TELEGRAM_CHAT_ID"); chatID != "" {
+id, err := strconv.ParseInt(chatID, 10, 64)
+if err != nil {
+return nil, fmt.Errorf("invalid TELEGRAM_CHAT_ID: %w", err)
+}
+cfg.TelegramChatID = id
+}
+
+// Validate required fields
+if cfg.TelegramToken == "" {
+return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
+}
+
+return cfg, nil
+}
+
+// Helper functions
 
 func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
+if value := os.Getenv(key); value != "" {
+return value
+}
+return defaultValue
 }
 
 func getEnvBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
-		return value == "true" || value == "1" || value == "yes"
-	}
-	return defaultValue
+if value := os.Getenv(key); value != "" {
+return value == "true" || value == "1" || value == "yes"
+}
+return defaultValue
 }
 
 func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if i, err := strconv.Atoi(value); err == nil {
-			return i
-		}
-	}
-	return defaultValue
+if value := os.Getenv(key); value != "" {
+if i, err := strconv.Atoi(value); err == nil {
+return i
+}
+}
+return defaultValue
 }
 
 func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if d, err := time.ParseDuration(value); err == nil {
-			return d
-		}
-	}
-	return defaultValue
+if value := os.Getenv(key); value != "" {
+if d, err := time.ParseDuration(value); err == nil {
+return d
+}
+}
+return defaultValue
 }
 
 func getEnvDecimal(key string, defaultValue decimal.Decimal) decimal.Decimal {
-	if value := os.Getenv(key); value != "" {
-		if d, err := decimal.NewFromString(value); err == nil {
-			return d
-		}
-	}
-	return defaultValue
+if value := os.Getenv(key); value != "" {
+if d, err := decimal.NewFromString(value); err == nil {
+return d
 }
-
-func getEnvFloat(key string, defaultValue float64) float64 {
-	if value := os.Getenv(key); value != "" {
-		if f, err := strconv.ParseFloat(value, 64); err == nil {
-			return f
-		}
-	}
-	return defaultValue
+}
+return defaultValue
 }

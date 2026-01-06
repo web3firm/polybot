@@ -1,12 +1,16 @@
-// Polybot - Crypto Prediction Trading Bot for Polymarket
+// Polybot - Latency Arbitrage Trading Bot for Polymarket
 //
-// This bot uses technical indicators to predict cryptocurrency price movements
-// and trades Polymarket prediction windows based on those signals.
+// This bot exploits the information lag between Binance BTC price movements
+// and Polymarket odds updates on Bitcoin Up/Down prediction windows.
 //
-// Architecture: Strategy → Risk → Trade
-// - Strategy generates signals (UP/DOWN/NO_TRADE) with confidence
-// - Risk manager validates signals and sizes positions
-// - Trading engine executes approved trades
+// Strategy:
+// 1. Track BTC price at window start from Binance WebSocket
+// 2. Detect significant price moves (>0.2%)
+// 3. Check if Polymarket odds are stale (still ~50/50)
+// 4. Buy the winning side at discounted odds
+// 5. Collect $1 on resolution
+//
+// Reference: @PurpleThunderBicycleMountain - $330k profit in 1 month
 package main
 
 import (
@@ -18,22 +22,16 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/shopspring/decimal"
 
+	"github.com/web3guy0/polybot/internal/arbitrage"
 	"github.com/web3guy0/polybot/internal/binance"
 	"github.com/web3guy0/polybot/internal/bot"
 	"github.com/web3guy0/polybot/internal/config"
 	"github.com/web3guy0/polybot/internal/database"
-	"github.com/web3guy0/polybot/internal/datafeed"
-	"github.com/web3guy0/polybot/internal/markets"
 	"github.com/web3guy0/polybot/internal/polymarket"
-	"github.com/web3guy0/polybot/internal/predictor"
-	"github.com/web3guy0/polybot/internal/risk"
-	"github.com/web3guy0/polybot/internal/strategy"
-	"github.com/web3guy0/polybot/internal/trading"
 )
 
-const version = "3.1.0"
+const version = "4.0.0"
 
 func main() {
 	// Setup logging
@@ -62,8 +60,14 @@ func main() {
 
 	log.Info().
 		Str("version", version).
+		Str("mode", "latency_arbitrage").
 		Str("asset", asset).
-		Msg("🚀 Polybot starting...")
+		Bool("dry_run", cfg.DryRun).
+		Msg("⚡ Polybot Arbitrage starting...")
+
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Initialize database
 	db, err := database.New(cfg.DatabasePath)
@@ -71,128 +75,92 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to initialize database")
 	}
 
-	// Initialize trading engine
-	tradingEngine := trading.NewEngine(cfg, db)
+	// ====== CORE COMPONENTS ======
 
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// 1. Binance client - real-time BTC price feed
+	binanceClient := binance.NewClient()
+	if err := binanceClient.Start(); err != nil {
+		log.Fatal().Err(err).Msg("Failed to start Binance client")
+	}
+	log.Info().Msg("📈 Binance WebSocket connected")
 
-	// ====== PREDICTION SYSTEM ======
-	var binanceClient *binance.Client
-	var marketManager *markets.MarketManager
-	var riskManager *risk.RiskManager
-	var pred *predictor.Predictor
-	var windowScanner *polymarket.BTCWindowScanner
-	var trader *trading.BTCTrader
+	// 2. Window scanner - find active prediction windows
+	windowScanner := polymarket.NewWindowScanner(cfg.PolymarketAPIURL, asset)
+	windowScanner.Start()
+	log.Info().Str("asset", asset).Msg("🔍 Window scanner started")
 
-	if cfg.BTCEnabled {
-		log.Info().Str("asset", asset).Msg("🔶 Initializing prediction system...")
+	// 3. Arbitrage engine - the money maker
+	arbEngine := arbitrage.NewEngine(cfg, binanceClient, windowScanner)
 
-		// 1. Initialize Binance client (data source)
-		binanceClient = binance.NewClient()
-		if err := binanceClient.Start(); err != nil {
-			log.Error().Err(err).Msg("Failed to start Binance client")
+	// Start the arbitrage engine
+	arbEngine.Start()
+	log.Info().Msg("⚡ Arbitrage engine started")
+
+	// 4. CLOB client - for account/positions data
+	// Works with either: API credentials OR wallet private key (will derive creds)
+	var clobClient *arbitrage.CLOBClient
+	if cfg.WalletPrivateKey != "" || (cfg.CLOBApiKey != "" && cfg.CLOBApiSecret != "") {
+		clobClient, err = arbitrage.NewCLOBClient(
+			cfg.CLOBApiKey,
+			cfg.CLOBApiSecret,
+			cfg.CLOBPassphrase,
+			cfg.WalletPrivateKey,
+			cfg.SignerAddress,
+			cfg.FunderAddress,
+			cfg.SignatureType,
+		)
+		if err != nil {
+			log.Warn().Err(err).Msg("⚠️ Failed to initialize CLOB client - account features disabled")
+		} else {
+			log.Info().Msg("💳 CLOB client initialized")
 		}
-
-		// 2. Initialize Risk Manager
-		riskConfig := risk.RiskConfig{
-			MaxBetSize:       cfg.Risk.MaxBetSize,
-			MinBetSize:       decimal.NewFromFloat(1.0),
-			MaxPositionPct:   0.05,
-			MaxDailyLoss:     cfg.Risk.MaxDailyLoss,
-			MaxDailyTrades:   cfg.Risk.MaxDailyTrades,
-			MaxDailyExposure: cfg.Risk.MaxDailyExposure,
-			MinConfidence:    cfg.Risk.MinConfidence,
-			MinStrength:      strategy.StrengthModerate,
-			MinLiquidity:     cfg.Risk.MinLiquidity,
-			MaxSpread:        0.05,
-			MinOdds:          cfg.BTCMinOdds.InexactFloat64(),
-			MaxOdds:          cfg.BTCMaxOdds.InexactFloat64(),
-			MinTimeToExpiry:  cfg.BTCCooldown,
-			TradeCooldown:    cfg.Risk.TradeCooldown,
-			ChopFilter:       cfg.Risk.ChopFilter,
-			ChopThreshold:    cfg.Risk.ChopThreshold,
-		}
-		riskManager = risk.NewRiskManager(riskConfig)
-
-		// 3. Initialize Market Manager
-		marketManager = markets.NewMarketManager(riskManager, cfg.Bankroll)
-
-		// 4. Register strategy for configured asset
-		crypto15mStrategy := strategy.NewCrypto15mStrategy(asset)
-		marketManager.RegisterStrategy(crypto15mStrategy)
-
-		// 5. Register data feed
-		binanceFeed := datafeed.NewBinanceDataFeed(binanceClient)
-		marketManager.RegisterDataFeed(asset, binanceFeed)
-
-		// 6. Load markets from config
-		marketConfigs := make([]markets.MarketConfig, len(cfg.Markets))
-		for i, m := range cfg.Markets {
-			marketConfigs[i] = markets.MarketConfig{
-				ID:           m.ID,
-				Asset:        m.Asset,
-				Timeframe:    m.Timeframe,
-				StrategyName: m.Strategy,
-				MaxBet:       m.MaxBet,
-				Enabled:      m.Enabled,
-			}
-		}
-		if err := marketManager.LoadMarkets(marketConfigs); err != nil {
-			log.Error().Err(err).Msg("Failed to load markets")
-		}
-
-		// 7. Start market manager
-		go marketManager.Start(ctx)
-
-		// ====== TELEGRAM BOT COMPONENTS ======
-		// Window scanner for Polymarket
-		windowScanner = polymarket.NewBTCWindowScanner(cfg.PolymarketAPIURL)
-		windowScanner.Start()
-
-		// Predictor for signal generation
-		pred = predictor.NewPredictor(cfg, binanceClient)
-		pred.Start()
-
-		// Trader for executing trades
-		trader = trading.NewBTCTrader(cfg, db, windowScanner, pred)
-		if cfg.BTCAutoTrade {
-			trader.Start()
-		}
-
-		log.Info().Msg("✅ Prediction system initialized")
+	} else {
+		log.Warn().Msg("⚠️ No wallet private key - add WALLET_PRIVATE_KEY to .env for account features")
 	}
 
-	// Initialize Telegram bot
-	telegramBot, err := bot.New(cfg, db, tradingEngine, binanceClient, pred, windowScanner, trader)
+	// ====== TELEGRAM BOT ======
+	telegramBot, err := bot.NewArbBot(cfg, db, binanceClient, windowScanner, arbEngine, clobClient)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize Telegram bot")
 	}
 
-	// Start bot
 	go telegramBot.Start()
 
-	log.Info().Msg("✅ All services started")
-	log.Info().Msg("📊 Architecture: Strategy → Risk → Trade")
-	log.Info().Msg("💡 Use /help to see available commands")
+	// ====== STARTUP COMPLETE ======
+	log.Info().Msg("✅ All systems online")
+	log.Info().Msg("")
+	log.Info().Msg("╔══════════════════════════════════════════╗")
+	log.Info().Msg("║     LATENCY ARBITRAGE MODE ACTIVE        ║")
+	log.Info().Msg("║                                          ║")
+	log.Info().Msg("║  Strategy: Exploit Binance→Polymarket    ║")
+	log.Info().Msg("║            information lag               ║")
+	log.Info().Msg("║                                          ║")
+	log.Info().Msg("║  BTC moves on Binance                    ║")
+	log.Info().Msg("║  → Polymarket odds stale                 ║")
+	log.Info().Msg("║  → Buy mispriced outcome                 ║")
+	log.Info().Msg("║  → Collect $1 on resolution              ║")
+	log.Info().Msg("╚══════════════════════════════════════════╝")
+	log.Info().Msg("")
+	log.Info().Msg("💡 Use /help for commands")
 
 	// Wait for shutdown signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
 
-	log.Info().Msg("🛑 Shutting down...")
+	select {
+	case <-quit:
+		log.Info().Msg("🛑 Received shutdown signal")
+	case <-ctx.Done():
+		log.Info().Msg("🛑 Context cancelled")
+	}
 
 	// Graceful shutdown
-	cancel()
+	log.Info().Msg("Shutting down...")
+
 	telegramBot.Stop()
-	if marketManager != nil {
-		marketManager.Stop()
-	}
-	if binanceClient != nil {
-		binanceClient.Stop()
-	}
+	arbEngine.Stop()
+	windowScanner.Stop()
+	binanceClient.Stop()
 
 	log.Info().Msg("👋 Goodbye!")
 }
