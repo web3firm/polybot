@@ -130,7 +130,7 @@ func NewCLOBClient(apiKey, apiSecret, passphrase, walletPrivateKey, signerAddres
 		apiKey:        apiKey,
 		apiSecret:     apiSecret,
 		passphrase:    passphrase,
-		httpClient:    &http.Client{Timeout: 5 * time.Second},
+		httpClient:    &http.Client{Timeout: 2 * time.Second}, // ⚡ FAST timeout - 2s max
 		signatureType: signatureType,
 	}
 
@@ -391,41 +391,68 @@ func (c *CLOBClient) PlaceOrder(order Order) (*OrderResponse, error) {
 
 // PlaceMarketBuy places a market buy order using native Go EIP-712 signing
 func (c *CLOBClient) PlaceMarketBuy(tokenID string, size decimal.Decimal) (*OrderResponse, error) {
-	return c.placeOrder(tokenID, SideBuy, size)
+	return c.placeOrder(tokenID, SideBuy, size, decimal.Zero) // Zero = fetch price
 }
 
 // PlaceMarketSell places a market sell order using native Go EIP-712 signing
 func (c *CLOBClient) PlaceMarketSell(tokenID string, size decimal.Decimal) (*OrderResponse, error) {
-	return c.placeOrder(tokenID, SideSell, size)
+	return c.placeOrder(tokenID, SideSell, size, decimal.Zero) // Zero = fetch price
+}
+
+// PlaceMarketBuyAtPrice places a market buy WITHOUT fetching price again (FAST!)
+func (c *CLOBClient) PlaceMarketBuyAtPrice(tokenID string, size decimal.Decimal, marketPrice decimal.Decimal) (*OrderResponse, error) {
+	return c.placeOrder(tokenID, SideBuy, size, marketPrice)
+}
+
+// PlaceMarketSellAtPrice places a market sell WITHOUT fetching price again (FAST!)
+func (c *CLOBClient) PlaceMarketSellAtPrice(tokenID string, size decimal.Decimal, marketPrice decimal.Decimal) (*OrderResponse, error) {
+	return c.placeOrder(tokenID, SideSell, size, marketPrice)
 }
 
 // placeOrder places an order using native Go EIP-712 signing (fast!)
-func (c *CLOBClient) placeOrder(tokenID string, side int, size decimal.Decimal) (*OrderResponse, error) {
+// If marketPrice is provided (non-zero), skip the odds fetch for speed
+func (c *CLOBClient) placeOrder(tokenID string, side int, size decimal.Decimal, marketPrice decimal.Decimal) (*OrderResponse, error) {
 	start := time.Now()
 
-	// Get current best price for order
-	fetcher := NewOddsFetcher()
-	odds, err := fetcher.GetLiveOdds(tokenID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get odds: %w", err)
-	}
-
 	var price decimal.Decimal
-	if side == SideBuy {
-		// Add 2% slippage to best ask to ensure fill
-		slippage := decimal.NewFromFloat(0.02)
-		price = odds.BestAsk.Add(slippage)
-		// Cap at 0.99 (never pay more than 99 cents)
-		if price.GreaterThan(decimal.NewFromFloat(0.99)) {
-			price = decimal.NewFromFloat(0.99)
+	
+	// ⚡ SPEED: If price already provided, skip the API call
+	if !marketPrice.IsZero() {
+		if side == SideBuy {
+			// Add 3% slippage to ensure fill
+			slippage := decimal.NewFromFloat(0.03)
+			price = marketPrice.Add(slippage)
+			if price.GreaterThan(decimal.NewFromFloat(0.99)) {
+				price = decimal.NewFromFloat(0.99)
+			}
+		} else {
+			// Subtract 3% for sells
+			slippage := decimal.NewFromFloat(0.03)
+			price = marketPrice.Sub(slippage)
+			if price.LessThan(decimal.NewFromFloat(0.01)) {
+				price = decimal.NewFromFloat(0.01)
+			}
 		}
 	} else {
-		// Subtract 2% from best bid for sells
-		slippage := decimal.NewFromFloat(0.02)
-		price = odds.BestBid.Sub(slippage)
-		// Floor at 0.01 (never sell for less than 1 cent)
-		if price.LessThan(decimal.NewFromFloat(0.01)) {
-			price = decimal.NewFromFloat(0.01)
+		// Fetch current best price (slower)
+		fetcher := NewOddsFetcher()
+		odds, err := fetcher.GetLiveOdds(tokenID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get odds: %w", err)
+		}
+
+		if side == SideBuy {
+			slippage := decimal.NewFromFloat(0.03)
+			price = odds.BestAsk.Add(slippage)
+			if price.GreaterThan(decimal.NewFromFloat(0.99)) {
+				price = decimal.NewFromFloat(0.99)
+			}
+		} else {
+			slippage := decimal.NewFromFloat(0.03)
+			price = odds.BestBid.Sub(slippage)
+			if price.LessThan(decimal.NewFromFloat(0.01)) {
+				price = decimal.NewFromFloat(0.01)
+			}
 		}
 	}
 

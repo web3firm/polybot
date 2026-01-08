@@ -330,15 +330,81 @@ func (e *Engine) Stop() {
 // Speed is critical - the 30-90 second lag window requires fast detection
 func (e *Engine) arbitrageLoop() {
 	ticker := time.NewTicker(100 * time.Millisecond)
+	statusTicker := time.NewTicker(30 * time.Second) // Status update every 30s
 	defer ticker.Stop()
+	defer statusTicker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
 			e.checkOpportunities()
+		case <-statusTicker.C:
+			e.logStatus() // Show current market analysis
 		case <-e.stopCh:
 			return
 		}
+	}
+}
+
+// logStatus logs current market analysis for debugging
+func (e *Engine) logStatus() {
+	e.windowsMu.RLock()
+	defer e.windowsMu.RUnlock()
+
+	// Use Chainlink price (same source as start price for consistency!)
+	var currentPrice decimal.Decimal
+	if e.chainlinkClient != nil {
+		currentPrice = e.chainlinkClient.GetCurrentPrice()
+	}
+	if currentPrice.IsZero() {
+		currentPrice = e.binanceClient.GetCurrentPrice()
+	}
+	binancePrice := e.binanceClient.GetCurrentPrice()
+
+	for _, state := range e.windowStates {
+		if state.StartPrice.IsZero() {
+			continue
+		}
+
+		priceChange := currentPrice.Sub(state.StartPrice)
+		priceChangePct := priceChange.Div(state.StartPrice).Mul(decimal.NewFromInt(100))
+		absChangePct := priceChangePct.Abs()
+
+		var direction string
+		var targetOdds decimal.Decimal
+		if priceChangePct.IsPositive() {
+			direction = "UP"
+			targetOdds = state.CurrentUpOdds
+		} else {
+			direction = "DOWN"
+			targetOdds = state.CurrentDownOdds
+		}
+
+		// Determine why no trade
+		var reason string
+		minMovePct := e.minPriceMove.Mul(decimal.NewFromInt(100)) // Convert 0.002 to 0.2
+		
+		if absChangePct.LessThan(minMovePct) {
+			reason = fmt.Sprintf("⏳ Move too small (%.3f%% < %.1f%%)", absChangePct.InexactFloat64(), minMovePct.InexactFloat64())
+		} else if targetOdds.GreaterThan(e.maxOddsForEntry) {
+			reason = fmt.Sprintf("📈 Odds too high (%.0f¢ > %.0f¢)", targetOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), e.maxOddsForEntry.Mul(decimal.NewFromInt(100)).InexactFloat64())
+		} else if targetOdds.LessThan(e.minOddsForEntry) {
+			reason = fmt.Sprintf("📉 Odds too low (%.0f¢ < %.0f¢)", targetOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), e.minOddsForEntry.Mul(decimal.NewFromInt(100)).InexactFloat64())
+		} else {
+			reason = "🚀 READY TO TRADE!"
+		}
+
+		log.Info().
+			Str("direction", direction).
+			Str("btc_move", priceChangePct.StringFixed(3)+"%").
+			Str("min_move", minMovePct.StringFixed(1)+"%").
+			Str("chainlink", currentPrice.StringFixed(2)).
+			Str("binance", binancePrice.StringFixed(2)).
+			Str("spread", binancePrice.Sub(currentPrice).StringFixed(2)).
+			Str("up_odds", state.CurrentUpOdds.String()).
+			Str("down_odds", state.CurrentDownOdds.String()).
+			Str("reason", reason).
+			Msg("📊 MARKET STATUS")
 	}
 }
 
@@ -581,44 +647,44 @@ func (e *Engine) updateWindowStates() {
 	for i := range windows {
 		w := &windows[i]
 		if _, exists := e.windowStates[w.ID]; !exists {
-			// New window - get the "Price to Beat" from Chainlink on-chain historical data
-			// Polymarket uses Chainlink Data Streams for resolution, so on-chain Chainlink
-			// is the closest approximation (~$30 difference vs ~$80 with Binance)
+			// New window - get the "Price to Beat"
+			// 
+			// IMPORTANT: Use BINANCE for both current price AND Price to Beat
+			// This ensures CONSISTENCY - even if Binance differs from Chainlink Data Streams
+			// by ~$30-50, the DIRECTION calculation will be correct because we're comparing
+			// Binance-to-Binance, not Binance-to-Chainlink
+			//
+			// Polymarket uses Chainlink Data Streams (paid, sub-second) for resolution
+			// We can't access that for free, so we use the fastest free source: Binance
 			var startPrice decimal.Decimal
 			
-			// Primary method: Chainlink on-chain historical price at window start
-			// This queries getRoundData() backwards to find the round just before window start
-			if e.chainlinkClient != nil && !w.StartDate.IsZero() {
-				historicalPrice, err := e.chainlinkClient.GetHistoricalPrice(w.StartDate)
-				if err == nil && !historicalPrice.IsZero() {
-					startPrice = historicalPrice
-					log.Info().
-						Str("window_start", w.StartDate.Format("15:04:05")).
-						Str("price_to_beat", startPrice.StringFixed(2)).
-						Msg("⛓️ Got Price to Beat from Chainlink on-chain")
-				} else {
-					log.Debug().Err(err).Msg("Could not get Chainlink historical price")
-				}
-			}
-			
-			// Fallback to Binance 1s kline if Chainlink historical not available
-			if startPrice.IsZero() && e.binanceClient != nil && !w.StartDate.IsZero() {
+			// Primary method: Binance 1s kline at window start (FAST + CONSISTENT)
+			if e.binanceClient != nil && !w.StartDate.IsZero() {
 				historicalPrice, err := e.binanceClient.GetPriceAtTime(w.StartDate)
 				if err == nil && !historicalPrice.IsZero() {
 					startPrice = historicalPrice
 					log.Info().
 						Str("window_start", w.StartDate.Format("15:04:05")).
 						Str("price_to_beat", startPrice.StringFixed(2)).
-						Msg("📈 Got Price to Beat from Binance (fallback)")
+						Msg("📈 Got Price to Beat from Binance (consistent with detection)")
+				} else {
+					log.Debug().Err(err).Msg("Could not get Binance historical price")
 				}
 			}
 			
-			// Fallback to current Chainlink price
-			if startPrice.IsZero() && !chainlinkPrice.IsZero() {
-				startPrice = chainlinkPrice
-				log.Debug().Str("price", startPrice.StringFixed(2)).Msg("Using current Chainlink price as fallback")
+			// Fallback to Chainlink on-chain if Binance fails
+			if startPrice.IsZero() && e.chainlinkClient != nil && !w.StartDate.IsZero() {
+				historicalPrice, err := e.chainlinkClient.GetHistoricalPrice(w.StartDate)
+				if err == nil && !historicalPrice.IsZero() {
+					startPrice = historicalPrice
+					log.Info().
+						Str("window_start", w.StartDate.Format("15:04:05")).
+						Str("price_to_beat", startPrice.StringFixed(2)).
+						Msg("⛓️ Got Price to Beat from Chainlink on-chain (fallback)")
+				}
 			}
-			// Final fallback to current Binance price
+			
+			// Fallback to current Binance price
 			if startPrice.IsZero() {
 				startPrice = binancePrice
 				log.Debug().Str("price", startPrice.StringFixed(2)).Msg("Using current Binance price as fallback")
@@ -686,7 +752,18 @@ func (e *Engine) refreshOdds() {
 
 // checkOpportunities scans for arbitrage opportunities
 func (e *Engine) checkOpportunities() {
-	currentBTC := e.binanceClient.GetCurrentPrice()
+	// ⚡ CRITICAL: Use Chainlink on-chain for current price to match start price source!
+	// Polymarket uses Chainlink Data Streams for resolution.
+	// Chainlink on-chain is ~$20-30 off but CONSISTENT with our start price.
+	// Binance is ~$30-50 off from Data Streams, causing direction mismatches.
+	var currentBTC decimal.Decimal
+	if e.chainlinkClient != nil {
+		currentBTC = e.chainlinkClient.GetCurrentPrice()
+	}
+	// Fallback to Binance if Chainlink unavailable
+	if currentBTC.IsZero() {
+		currentBTC = e.binanceClient.GetCurrentPrice()
+	}
 	if currentBTC.IsZero() {
 		return
 	}
@@ -725,10 +802,10 @@ func (e *Engine) analyzeWindow(state *WindowState, currentBTC decimal.Decimal) *
 	// Check if move is significant enough
 	absChangePct := priceChangePct.Abs()
 	if absChangePct.LessThan(e.minPriceMove) {
-		return nil
+		return nil // Move too small, no opportunity
 	}
 
-	// Determine direction
+	// Determine direction we'd bet on
 	var direction string
 	var marketOdds decimal.Decimal
 
@@ -743,9 +820,17 @@ func (e *Engine) analyzeWindow(state *WindowState, currentBTC decimal.Decimal) *
 	// Check if odds are stale (still cheap despite the move)
 	// Entry range: 35¢-65¢ (with new Polymarket fees, wider range is better)
 	if marketOdds.GreaterThan(e.maxOddsForEntry) {
+		log.Debug().
+			Str("odds", marketOdds.String()).
+			Str("max", e.maxOddsForEntry.String()).
+			Msg("⏭️ Odds too high - market already adjusted")
 		return nil // Too expensive - market has already adjusted
 	}
 	if marketOdds.LessThan(e.minOddsForEntry) {
+		log.Debug().
+			Str("odds", marketOdds.String()).
+			Str("min", e.minOddsForEntry.String()).
+			Msg("⏭️ Odds too low - skipping")
 		return nil // Too cheap - something is wrong or too risky
 	}
 
@@ -758,8 +843,20 @@ func (e *Engine) analyzeWindow(state *WindowState, currentBTC decimal.Decimal) *
 	edge := fairOdds.Sub(marketOdds)
 
 	if edge.LessThan(e.minEdge) {
+		log.Debug().
+			Str("edge", edge.Mul(decimal.NewFromInt(100)).String()+"%").
+			Str("min_edge", e.minEdge.Mul(decimal.NewFromInt(100)).String()+"%").
+			Msg("⏭️ Edge too small")
 		return nil // Not enough edge
 	}
+
+	// 🚀 OPPORTUNITY FOUND! Log it prominently
+	log.Info().
+		Str("direction", direction).
+		Str("btc_move", absChangePct.Mul(decimal.NewFromInt(100)).StringFixed(2)+"%").
+		Str("odds", marketOdds.String()).
+		Str("edge", edge.Mul(decimal.NewFromInt(100)).StringFixed(1)+"%").
+		Msg("🎯 OPPORTUNITY DETECTED!")
 
 	// Calculate confidence based on move size and time remaining
 	confidence := e.calculateConfidence(absChangePct, state.Window.EndDate)
@@ -859,11 +956,13 @@ func (e *Engine) handleOpportunity(opp Opportunity, state *WindowState) {
 func (e *Engine) shouldTrade(state *WindowState) bool {
 	// Check if in dry run mode
 	if e.cfg.DryRun {
+		log.Debug().Msg("❌ Trade blocked: DRY_RUN=true")
 		return false
 	}
 
 	// Check if arbitrage is enabled
 	if !e.cfg.ArbEnabled {
+		log.Debug().Msg("❌ Trade blocked: ARB_ENABLED=false")
 		return false
 	}
 
@@ -931,16 +1030,21 @@ func (e *Engine) executeTrade(opp Opportunity, state *WindowState) *Trade {
 		Str("edge", trade.Edge.Mul(decimal.NewFromInt(100)).String()+"%").
 		Str("window", truncate(trade.Question, 40)).
 		Bool("live", !e.cfg.DryRun).
-		Msg("⚡ ARBITRAGE TRADE")
+		Msg("⚡ ARBITRAGE TRADE EXECUTING...")
 
-	// Execute actual trade if CLOB client is available
+	// ⚡ Execute actual trade if CLOB client is available
+	// Use PlaceMarketBuyAtPrice to avoid redundant odds fetch (SPEED CRITICAL!)
 	if e.clobClient != nil && tokenID != "" {
-		orderResp, err := e.clobClient.PlaceMarketBuy(tokenID, shares)
+		startOrder := time.Now()
+		orderResp, err := e.clobClient.PlaceMarketBuyAtPrice(tokenID, shares, opp.MarketOdds)
+		orderTime := time.Since(startOrder)
+		
 		if err != nil {
 			log.Error().
 				Err(err).
 				Str("token", tokenID).
 				Str("shares", shares.String()).
+				Dur("order_time_ms", orderTime).
 				Msg("❌ Order placement failed")
 			trade.Status = "failed"
 			return nil
@@ -949,6 +1053,7 @@ func (e *Engine) executeTrade(opp Opportunity, state *WindowState) *Trade {
 		log.Info().
 			Str("order_id", orderResp.OrderID).
 			Str("status", orderResp.Status).
+			Dur("order_time_ms", orderTime).
 			Msg("✅ Order filled")
 		trade.ID = orderResp.OrderID
 		trade.Status = "filled"
