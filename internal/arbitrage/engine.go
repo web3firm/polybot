@@ -173,10 +173,10 @@ func NewEngine(cfg *config.Config, bc *binance.Client, cl *chainlink.Client, cmc
 		stopCh:           make(chan struct{}),
 
 		// Default config - FEE-ADJUSTED strategy (with 3.15% Polymarket fee)
-		// Buy at 35-65¢, exit at 75¢ OR stop-loss at -20% OR hold to resolution
-		minPriceMove:       decimal.NewFromFloat(0.002),  // 0.2% min move
-		minOddsForEntry:    decimal.NewFromFloat(0.35),   // 35 cents min (avoid extreme odds)
-		maxOddsForEntry:    decimal.NewFromFloat(0.65),   // 65 cents max (wider range)
+		// Buy at 25-65¢, exit at 75¢ OR stop-loss at -20% OR hold to resolution
+		minPriceMove:       decimal.NewFromFloat(0.001),  // 0.1% min move (~$90)
+		minOddsForEntry:    decimal.NewFromFloat(0.25),   // 25 cents min (aggressive!)
+		maxOddsForEntry:    decimal.NewFromFloat(0.65),   // 65 cents max
 		minEdge:            decimal.NewFromFloat(0.10),   // 10% min edge
 		positionSize:       decimal.NewFromFloat(100),    // $100 per trade
 		maxDailyTrades:     200,
