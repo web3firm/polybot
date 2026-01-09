@@ -258,13 +258,14 @@ func toMakerAmount(amount float64) *big.Int {
 	return big.NewInt(int64(truncated))
 }
 
-// toTakerAmount converts share amount with max 4 decimal precision
-// Polymarket requires takerAmount to have max 4 decimals
+// toTakerAmount converts share amount with max 2 decimal precision for BUY orders
+// Polymarket error: "buy orders... taker amount a max of 2 decimals"
+// This means takerAmount must be in units of 10000 (2 decimals when 6 decimal token)
 func toTakerAmount(amount float64) *big.Int {
-	// Round to 4 decimals then scale to 6 decimal token units
-	// e.g., 3.030125 -> 3.0301 -> 3030100
-	rounded := float64(int64(amount*10000+0.5)) / 10000
-	scaled := rounded * 1e6
+	// Truncate to 2 decimals then scale to 6 decimal token units
+	// e.g., 22.2222 -> 22.22 -> 22220000
+	truncated := float64(int64(amount*100)) / 100 // Truncate to 2 decimals
+	scaled := truncated * 1e6
 	return big.NewInt(int64(scaled))
 }
 

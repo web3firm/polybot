@@ -95,10 +95,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize database
-	db, err := database.New(cfg.DatabasePath)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize database")
+	// Initialize database (not used by scalper, but kept for future)
+	if _, dbErr := database.New(cfg.DatabasePath); dbErr != nil {
+		log.Warn().Err(dbErr).Msg("Database initialization failed (continuing without)")
 	}
 
 	// ====== CORE COMPONENTS ======
@@ -201,14 +200,22 @@ func main() {
 		log.Info().Str("asset", asset).Msg("⚡ Arbitrage engine started")
 	}
 
-	// ====== SMART DUAL-SIDE STRATEGY ======
-	// "Wait for Cheap" approach - enter when one side drops to cheap threshold
-	smartDualStrategies := make([]*arbitrage.SmartDualStrategy, 0, len(assets))
+	// ====== SCALPER STRATEGY ======
+	// Buy extreme mispricings (<20¢) and sell when they bounce to 33¢+
+	// CRITICAL: Uses engine's price-to-beat data to avoid late entries!
+	scalperStrategies := make([]*arbitrage.ScalperStrategy, 0, len(assets))
 	for i, asset := range assets {
-		smartDual := arbitrage.NewSmartDualStrategy(windowScanners[i], clobClient, cfg.DryRun)
-		smartDual.Start()
-		smartDualStrategies = append(smartDualStrategies, smartDual)
-		log.Info().Str("asset", asset).Bool("paper", cfg.DryRun).Msg("🎯 Smart dual-side strategy started")
+		scalper := arbitrage.NewScalperStrategy(
+			windowScanners[i], 
+			clobClient, 
+			cfg.DryRun,
+			cfg.ScalperPositionSize,    // Position size from config
+		)
+		// Link scalper to engine for price-to-beat data
+		scalper.SetEngine(arbEngines[i])
+		scalper.Start()
+		scalperStrategies = append(scalperStrategies, scalper)
+		log.Info().Str("asset", asset).Bool("paper", cfg.DryRun).Msg("🎯 Scalper strategy started")
 	}
 	
 	// Subscribe to WebSocket markets for all active windows
@@ -226,19 +233,17 @@ func main() {
 		}()
 	}
 
-	// Use first engine as primary for Telegram bot (BTC typically)
-	primaryScanner := windowScanners[0]
-	primaryEngine := arbEngines[0]
-
 	// ====== TELEGRAM BOT ======
-	telegramBot, err := bot.NewArbBot(cfg, db, binanceClient, primaryScanner, primaryEngine, clobClient)
+	telegramBot, err := bot.New(cfg)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize Telegram bot")
 	}
 	
-	// Set multi-asset support
-	telegramBot.SetCMCClient(cmcClient)
-	telegramBot.SetAllEngines(arbEngines)
+	// Register engines and scalpers for each asset
+	for i, asset := range assets {
+		telegramBot.AddEngine(asset, arbEngines[i])
+		telegramBot.AddScalper(asset, scalperStrategies[i])
+	}
 
 	go telegramBot.Start()
 
@@ -256,7 +261,7 @@ func main() {
 	log.Info().Msg("║  → Exit at 75¢ OR hold to resolution     ║")
 	log.Info().Msg("║                                          ║")
 	log.Info().Msg("║  🚀 Dynamic Sizing: 1x/2x/3x by move     ║")
-	log.Info().Msg("║  🎯 Smart Dual: Wait for cheap sides     ║")
+	log.Info().Msg("║  🎯 Scalper: Buy cheap, sell on bounce   ║")
 	log.Info().Msg("╚══════════════════════════════════════════╝")
 	log.Info().Msg("")
 	log.Info().Msg("💡 Use /help for commands")
@@ -279,8 +284,8 @@ func main() {
 	for _, engine := range arbEngines {
 		engine.Stop()
 	}
-	for _, smartDual := range smartDualStrategies {
-		smartDual.Stop()
+	for _, scalper := range scalperStrategies {
+		scalper.Stop()
 	}
 	for _, scanner := range windowScanners {
 		scanner.Stop()

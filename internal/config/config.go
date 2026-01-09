@@ -51,6 +51,10 @@ SignatureType    int    // 0=EOA, 1=Magic/Email, 2=Proxy
 	ArbMaxTradesPerWindow int            // Max trades per 15-min window
 	ArbCooldownSeconds   int
 
+	// Scalper Strategy Settings
+	ScalperPositionSize  decimal.Decimal // USD per scalp trade
+	ScalperEntryThreshold decimal.Decimal // Enter when odds drop to this (e.g., 0.25)
+
 	// Triple Exit Strategy
 	ArbExitOddsThreshold decimal.Decimal // e.g., 0.75 = exit at 75¢ for quick flip
 	ArbHoldThreshold     decimal.Decimal // e.g., 0.005 = 0.5% BTC move confirms direction
@@ -99,6 +103,10 @@ SignatureType:    getEnvInt("SIGNATURE_TYPE", 0),
 		ArbMaxDailyTrades:    getEnvInt("ARB_MAX_DAILY_TRADES", 200),
 		ArbMaxTradesPerWindow: getEnvInt("ARB_MAX_TRADES_PER_WINDOW", 3),  // Max 3 trades per 15-min window
 		ArbCooldownSeconds:   getEnvInt("ARB_COOLDOWN_SECONDS", 10),
+
+		// Scalper Strategy
+		ScalperPositionSize:   getEnvDecimal("SCALPER_POSITION_SIZE", decimal.NewFromFloat(1)),   // Default $1
+		ScalperEntryThreshold: getEnvDecimal("SCALPER_ENTRY_THRESHOLD", decimal.NewFromFloat(0.25)), // 25¢
 
 		// Triple Exit Strategy
 		ArbExitOddsThreshold: getEnvDecimal("ARB_EXIT_ODDS", decimal.NewFromFloat(0.75)),       // Sell at 75¢+

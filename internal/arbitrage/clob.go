@@ -555,6 +555,22 @@ func (c *CLOBClient) PlaceLimitOrder(tokenID string, price, size decimal.Decimal
 		sideInt = SideSell
 	}
 
+	// Round price to valid tick size (0.01 for all prices on Polymarket)
+	// For BUY orders, round DOWN to not overpay
+	// For SELL orders, round UP to not undersell
+	tickSize := decimal.NewFromFloat(0.01)
+	if sideInt == SideBuy {
+		price = price.Div(tickSize).Floor().Mul(tickSize)
+	} else {
+		price = price.Div(tickSize).Ceil().Mul(tickSize)
+	}
+
+	// Ensure minimum size of 5 shares (Polymarket requirement)
+	minSize := decimal.NewFromInt(5)
+	if size.LessThan(minSize) {
+		size = minSize
+	}
+
 	// Create order signer
 	signer := NewOrderSigner(c.privateKey, c.address, c.funderAddress, c.signatureType)
 

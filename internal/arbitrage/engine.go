@@ -32,7 +32,9 @@ import (
 // WindowState tracks the state of a prediction window
 type WindowState struct {
 	Window           *polymarket.PredictionWindow
-	StartPrice       decimal.Decimal // BTC price when window started
+	StartPrice       decimal.Decimal // BTC price when window started (from Binance/Chainlink)
+	StartUpOdds      decimal.Decimal // Polymarket UP odds at window start
+	StartDownOdds    decimal.Decimal // Polymarket DOWN odds at window start
 	StartTime        time.Time
 	LastOddsCheck    time.Time
 	CurrentUpOdds    decimal.Decimal
@@ -290,6 +292,11 @@ func (e *Engine) GetAsset() string {
 	return e.asset
 }
 
+// GetWindowScanner returns the window scanner for this engine
+func (e *Engine) GetWindowScanner() *polymarket.WindowScanner {
+	return e.windowScanner
+}
+
 // SetExitCallback sets callback for position exits
 func (e *Engine) SetExitCallback(cb func(Trade)) {
 	e.onExit = cb
@@ -402,6 +409,34 @@ func (e *Engine) Stop() {
 	e.running = false
 	close(e.stopCh)
 	log.Info().Msg("Arbitrage engine stopped")
+}
+
+// GetWindowState returns the state for a specific window
+func (e *Engine) GetWindowState(windowID string) *WindowState {
+	e.windowsMu.RLock()
+	defer e.windowsMu.RUnlock()
+	return e.windowStates[windowID]
+}
+
+// GetCurrentPrice returns current price for the engine's asset (uses Chainlink as source of truth)
+func (e *Engine) GetCurrentPrice() decimal.Decimal {
+	asset := e.GetAsset()
+	
+	// Use multi-asset Chainlink if available
+	if e.multiChainlink != nil {
+		price := e.multiChainlink.GetPrice(asset)
+		if !price.IsZero() {
+			return price
+		}
+	}
+	
+	// Fallback to single Chainlink (BTC only)
+	if e.chainlinkClient != nil {
+		return e.chainlinkClient.GetCurrentPrice()
+	}
+	
+	// Last resort: Binance
+	return e.binanceClient.GetCurrentPrice()
 }
 
 // arbitrageLoop is the main loop checking for opportunities every 100ms
@@ -1002,6 +1037,25 @@ func (e *Engine) updateWindowStates() {
 			}
 			e.capturesMu.RUnlock()
 			
+			// CAPTURE POLYMARKET ODDS AT WINDOW START
+			// This is THE most important data - market's implied probability at T=0
+			var startUpOdds, startDownOdds decimal.Decimal
+			
+			// Try WebSocket first (real-time)
+			if e.wsClient != nil && e.wsClient.IsConnected() && w.YesTokenID != "" {
+				upPrice, downPrice, ok := e.wsClient.GetMarketPrices(w.YesTokenID, w.NoTokenID)
+				if ok && !upPrice.IsZero() {
+					startUpOdds = upPrice
+					startDownOdds = downPrice
+				}
+			}
+			
+			// Fallback to window's current odds from scanner
+			if startUpOdds.IsZero() {
+				startUpOdds = w.YesPrice
+				startDownOdds = w.NoPrice
+			}
+			
 			// If not pre-captured, use parallel snapshot
 			if startPrice.IsZero() {
 				// Collect parallel snapshots from ALL sources
@@ -1076,9 +1130,11 @@ func (e *Engine) updateWindowStates() {
 			}
 			
 			e.windowStates[w.ID] = &WindowState{
-				Window:     w,
-				StartPrice: startPrice,
-				StartTime:  w.StartDate,
+				Window:        w,
+				StartPrice:    startPrice,
+				StartUpOdds:   startUpOdds,    // Polymarket odds at window start!
+				StartDownOdds: startDownOdds,  // Polymarket odds at window start!
+				StartTime:     w.StartDate,
 			}
 			
 			if e.windowStates[w.ID].StartTime.IsZero() {
@@ -1088,6 +1144,8 @@ func (e *Engine) updateWindowStates() {
 			log.Info().
 				Str("window", truncate(w.Question, 50)).
 				Str("price_to_beat", startPrice.StringFixed(2)).
+				Str("start_up_odds", startUpOdds.StringFixed(3)).
+				Str("start_down_odds", startDownOdds.StringFixed(3)).
 				Str("source", priceSource).
 				Str("start_time", e.windowStates[w.ID].StartTime.Format("15:04:05")).
 				Msg("📊 Window tracked")
@@ -1393,6 +1451,11 @@ func (e *Engine) handleOpportunity(opp Opportunity, state *WindowState) {
 
 // shouldTrade determines if we should execute a trade
 func (e *Engine) shouldTrade(state *WindowState) bool {
+	// ⛔ ENGINE TRADING DISABLED - Only ScalperStrategy should trade!
+	// The old arbitrage engine logic loses money - use Scalper instead
+	log.Debug().Msg("⛔ Engine trading DISABLED - Scalper handles trades")
+	return false
+
 	// Check if in dry run mode
 	if e.cfg.DryRun {
 		log.Debug().Msg("❌ Trade blocked: DRY_RUN=true")
