@@ -54,9 +54,10 @@ type PredictionWindow struct {
 
 // WindowScanner scans for crypto prediction window markets
 type WindowScanner struct {
-	client  *Client
-	restURL string
-	asset   string // The asset to scan for (BTC, ETH, etc.)
+	client       *Client
+	restURL      string
+	asset        string // The asset to scan for (BTC, ETH, etc.)
+	priceFetcher *CLOBPriceFetcher // For real-time CLOB prices
 
 	windows   []PredictionWindow
 	windowsMu sync.RWMutex
@@ -70,11 +71,12 @@ type WindowScanner struct {
 // NewWindowScanner creates a new scanner for the given asset
 func NewWindowScanner(apiURL string, asset string) *WindowScanner {
 	return &WindowScanner{
-		client:  NewClient(apiURL),
-		restURL: apiURL,
-		asset:   strings.ToUpper(asset),
-		windows: make([]PredictionWindow, 0),
-		stopCh:  make(chan struct{}),
+		client:       NewClient(apiURL),
+		restURL:      apiURL,
+		asset:        strings.ToUpper(asset),
+		windows:      make([]PredictionWindow, 0),
+		stopCh:       make(chan struct{}),
+		priceFetcher: NewCLOBPriceFetcher(), // Add CLOB price fetcher
 	}
 }
 
@@ -121,7 +123,23 @@ func (s *WindowScanner) scan() {
 		return
 	}
 
-	log.Info().Int("found", len(windows)).Str("asset", s.asset).Msg("🔍 Windows scan complete")
+	// CRITICAL: Fetch LIVE prices from CLOB for each window!
+	for i := range windows {
+		if windows[i].YesTokenID != "" && windows[i].NoTokenID != "" {
+			upPrice, downPrice, err := s.priceFetcher.GetLivePrices(windows[i].YesTokenID, windows[i].NoTokenID)
+			if err == nil && !upPrice.IsZero() {
+				windows[i].YesPrice = upPrice
+				windows[i].NoPrice = downPrice
+				log.Debug().
+					Str("asset", windows[i].Asset).
+					Str("up_live", upPrice.String()).
+					Str("down_live", downPrice.String()).
+					Msg("📡 LIVE prices from CLOB")
+			}
+		}
+	}
+
+	log.Debug().Int("found", len(windows)).Str("asset", s.asset).Msg("🔍 Windows scan complete")
 
 	s.windowsMu.Lock()
 	oldWindows := make(map[string]bool)
