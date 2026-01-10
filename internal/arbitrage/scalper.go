@@ -349,6 +349,27 @@ func (s *ScalperStrategy) findScalpOpportunity(w *polymarket.PredictionWindow) {
 			momentum,
 		)
 		
+		// Always update ML signal display with latest analysis
+		signalStr := "HOLD"
+		if decision.ShouldTrade {
+			if decision.WinProb >= 0.7 {
+				signalStr = "STRONG_BUY"
+			} else {
+				signalStr = "BUY"
+			}
+		} else if decision.WinProb < 0.3 {
+			signalStr = "SKIP"
+		}
+		s.dashUpdateMLSignal(
+			asset,
+			decision.Side,
+			decision.MarketPrice,
+			decision.WinProb,
+			decision.Edge.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
+			decision.ExpectedValue.Mul(decimal.NewFromInt(100)).StringFixed(1)+"%",
+			signalStr,
+		)
+		
 		if decision.ShouldTrade {
 			// Model says GO!
 			s.dashAddOpportunity(asset, decision.Side, decision.MarketPrice, decimal.NewFromFloat(decision.WinProb), "🧠 BUY", decision.Reason)
@@ -1431,5 +1452,11 @@ func (s *ScalperStrategy) dashAddOpportunity(asset, side string, price, probabil
 		s.proDash.AddSignal(asset, side, price, probability, signal)
 	} else if s.dash != nil {
 		s.dash.AddOpportunity(asset, side, price, probability, signal, reason)
+	}
+}
+// dashUpdateMLSignal updates ML signal display on dashboard
+func (s *ScalperStrategy) dashUpdateMLSignal(asset, side string, price decimal.Decimal, probRev float64, edge, ev, signal string) {
+	if s.respDash != nil {
+		s.respDash.UpdateMLSignal(asset, side, price, probRev, edge, ev, signal)
 	}
 }

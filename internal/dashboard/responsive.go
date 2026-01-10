@@ -42,7 +42,7 @@ const (
 	cUnderline = "\033[4m"
 
 	// Theme colors
-	cPrimary   = "\033[38;5;75m"  // Bright blue
+	cPrimary   = "\033[38;5;39m"  // Cyan (thinner look)
 	cSecondary = "\033[38;5;248m" // Gray
 	cAccent    = "\033[38;5;220m" // Gold
 	cSuccess   = "\033[38;5;82m"  // Green
@@ -51,19 +51,19 @@ const (
 	cInfo      = "\033[38;5;39m"  // Cyan
 
 	// Background
-	cBgPanel  = "\033[48;5;236m" // Dark gray
-	cBgHeader = "\033[48;5;24m"  // Dark blue
-	cBgRow    = "\033[48;5;235m" // Slightly lighter
+	cBgPanel  = "\033[48;5;235m" // Dark gray (subtler)
+	cBgHeader = "\033[48;5;17m"  // Very dark blue
+	cBgRow    = "\033[48;5;234m" // Slightly lighter
 
-	// Box drawing - rounded corners for modern look
-	boxTL = "╭"
-	boxTR = "╮"
-	boxBL = "╰"
-	boxBR = "╯"
+	// Box drawing - thin lines for clean look
+	boxTL = "┌"
+	boxTR = "┐"
+	boxBL = "└"
+	boxBR = "┘"
 	boxH  = "─"
 	boxV  = "│"
-	boxHB = "━" // Bold horizontal
-	boxVB = "┃" // Bold vertical
+	boxHB = "─" // Same as regular (thin)
+	boxVB = "│" // Same as regular (thin)
 
 	// Status indicators
 	dotFilled = "●"
@@ -93,6 +93,7 @@ type ResponsiveDash struct {
 	markets   map[string]*RMarketData
 	positions map[string]*RPositionData
 	signals   []RSignalData
+	mlSignals map[string]*RMLSignal // ML analysis by asset
 	logs      []string
 
 	// Stats
@@ -143,6 +144,17 @@ type RSignalData struct {
 	Confidence float64
 }
 
+// RMLSignal holds ML analysis data for display
+type RMLSignal struct {
+	Asset    string
+	Side     string
+	Price    decimal.Decimal
+	ProbRev  float64 // P(reversal)
+	Edge     string
+	EV       string
+	Signal   string
+}
+
 // NewResponsiveDash creates a new responsive dashboard
 func NewResponsiveDash(strategyName string) *ResponsiveDash {
 	return &ResponsiveDash{
@@ -152,6 +164,7 @@ func NewResponsiveDash(strategyName string) *ResponsiveDash {
 		markets:      make(map[string]*RMarketData),
 		positions:    make(map[string]*RPositionData),
 		signals:      make([]RSignalData, 0, 50),
+		mlSignals:    make(map[string]*RMLSignal),
 		logs:         make([]string, 0, 100),
 		totalPnL:     decimal.Zero,
 		balance:      decimal.Zero,
@@ -299,50 +312,67 @@ func (d *ResponsiveDash) render() {
 
 func (d *ResponsiveDash) renderCompact(buf *strings.Builder) {
 	// Compact: Single column, essential info only
+	panelH := (d.height - 6) / 3
+	if panelH < 4 {
+		panelH = 4
+	}
+	
 	d.drawHeader(buf, d.width)
 	d.drawStatsBar(buf, d.width)
-	d.drawPanel(buf, "POSITIONS", 0, 4, d.width, 8, d.renderPositionsContent)
-	d.drawPanel(buf, "SIGNALS", 0, 13, d.width, 6, d.renderSignalsContent)
+	d.drawPanel(buf, "📋 POSITIONS", 0, 4, d.width, panelH, d.renderPositionsContent)
+	d.drawPanel(buf, "🧠 ML SIGNALS", 0, 4+panelH, d.width, panelH, d.renderMLSignalsContent)
+	d.drawPanel(buf, "📝 LOG", 0, 4+panelH*2, d.width, panelH, d.renderLogContent)
 	d.drawStatusBar(buf, d.width, d.height)
 }
 
 func (d *ResponsiveDash) renderMedium(buf *strings.Builder) {
-	// Medium: 2 columns
+	// Medium: 2 columns, fixed proportions for stability
 	leftW := d.width / 2
 	rightW := d.width - leftW
+	
+	// Calculate panel heights
+	panelH := (d.height - 6) / 2 // -4 for header/stats, -2 for status
+	if panelH < 6 {
+		panelH = 6
+	}
 
 	d.drawHeader(buf, d.width)
 	d.drawStatsBar(buf, d.width)
 
-	// Left column: Market + Positions
-	d.drawPanel(buf, "MARKET", 0, 4, leftW, 10, d.renderMarketContent)
-	d.drawPanel(buf, "POSITIONS", 0, 15, leftW, 10, d.renderPositionsContent)
+	// Top row: Market Data (left) + Active Positions (right)  
+	d.drawPanel(buf, "📊 MARKET DATA & PRICE TO BEAT", 0, 4, leftW, panelH, d.renderMarketContent)
+	d.drawPanel(buf, "📋 ACTIVE POSITIONS", leftW, 4, rightW, panelH, d.renderPositionsContent)
 
-	// Right column: Signals + Log
-	d.drawPanel(buf, "SIGNALS", leftW, 4, rightW, 10, d.renderSignalsContent)
-	d.drawPanel(buf, "ACTIVITY", leftW, 15, rightW, 10, d.renderLogContent)
+	// Bottom row: ML Signals (left) + Activity Log (right)
+	d.drawPanel(buf, "🧠 ML SIGNALS & ANALYSIS", 0, 4+panelH, leftW, panelH, d.renderMLSignalsContent)
+	d.drawPanel(buf, "📝 ACTIVITY LOG", leftW, 4+panelH, rightW, panelH, d.renderLogContent)
 
 	d.drawStatusBar(buf, d.width, d.height)
 }
-
 func (d *ResponsiveDash) renderWide(buf *strings.Builder) {
 	// Wide: 3 columns
 	col1W := d.width / 3
 	col2W := d.width / 3
 	col3W := d.width - col1W - col2W
+	
+	// Calculate panel heights
+	halfH := (d.height - 8) / 2
+	if halfH < 5 {
+		halfH = 5
+	}
 
 	d.drawHeader(buf, d.width)
 	d.drawStatsBar(buf, d.width)
 
-	// Column 1: Market data
-	d.drawPanel(buf, "MARKET DATA", 0, 4, col1W, d.height-8, d.renderMarketContent)
+	// Column 1: Market data (full height)
+	d.drawPanel(buf, "📊 MARKET DATA", 0, 4, col1W, d.height-8, d.renderMarketContent)
 
-	// Column 2: Positions
-	d.drawPanel(buf, "POSITIONS", col1W, 4, col2W, (d.height-8)/2, d.renderPositionsContent)
-	d.drawPanel(buf, "SIGNALS", col1W, 4+(d.height-8)/2, col2W, (d.height-8)/2, d.renderSignalsContent)
+	// Column 2: Positions (top) + ML Signals (bottom)
+	d.drawPanel(buf, "📋 POSITIONS", col1W, 4, col2W, halfH, d.renderPositionsContent)
+	d.drawPanel(buf, "🧠 ML SIGNALS", col1W, 4+halfH, col2W, halfH, d.renderMLSignalsContent)
 
-	// Column 3: Activity log
-	d.drawPanel(buf, "ACTIVITY LOG", col1W+col2W, 4, col3W, d.height-8, d.renderLogContent)
+	// Column 3: Activity log (full height)
+	d.drawPanel(buf, "📝 ACTIVITY LOG", col1W+col2W, 4, col3W, d.height-8, d.renderLogContent)
 
 	d.drawStatusBar(buf, d.width, d.height)
 }
@@ -354,10 +384,10 @@ func (d *ResponsiveDash) renderUltra(buf *strings.Builder) {
 	d.drawHeader(buf, d.width)
 	d.drawStatsBar(buf, d.width)
 
-	d.drawPanel(buf, "MARKET DATA", 0, 4, colW, d.height-8, d.renderMarketContent)
-	d.drawPanel(buf, "POSITIONS", colW, 4, colW, d.height-8, d.renderPositionsContent)
-	d.drawPanel(buf, "SIGNALS", colW*2, 4, colW, d.height-8, d.renderSignalsContent)
-	d.drawPanel(buf, "ACTIVITY LOG", colW*3, 4, colW, d.height-8, d.renderLogContent)
+	d.drawPanel(buf, "📊 MARKET DATA", 0, 4, colW, d.height-8, d.renderMarketContent)
+	d.drawPanel(buf, "📋 POSITIONS", colW, 4, colW, d.height-8, d.renderPositionsContent)
+	d.drawPanel(buf, "🧠 ML SIGNALS", colW*2, 4, colW, d.height-8, d.renderMLSignalsContent)
+	d.drawPanel(buf, "📝 ACTIVITY LOG", colW*3, 4, colW, d.height-8, d.renderLogContent)
 
 	d.drawStatusBar(buf, d.width, d.height)
 }
@@ -682,6 +712,76 @@ func (d *ResponsiveDash) renderSignalsContent(buf *strings.Builder, width, heigh
 	}
 }
 
+func (d *ResponsiveDash) renderMLSignalsContent(buf *strings.Builder, width, height int) {
+	if len(d.mlSignals) == 0 {
+		buf.WriteString(cDim + "No ML signals yet...\n" + cReset)
+		buf.WriteString(cDim + "Waiting for analysis..." + cReset)
+		return
+	}
+
+	// Header
+	if width >= 55 {
+		buf.WriteString(fmt.Sprintf("%sASSET    SIDE   P(REV)   EDGE     EV      SIGNAL%s\n",
+			cSecondary+cUnderline, cReset))
+	} else {
+		buf.WriteString(fmt.Sprintf("%sASSET SIDE  SIGNAL%s\n", cSecondary+cUnderline, cReset))
+	}
+
+	row := 0
+	for _, ml := range d.mlSignals {
+		if row >= height-2 {
+			break
+		}
+
+		// Side color
+		sideColor := cSuccess
+		sideIcon := arrowUp
+		if ml.Side == "DOWN" {
+			sideColor = cDanger
+			sideIcon = arrowDown
+		}
+
+		// Signal color based on signal strength
+		sigColor := cDim
+		switch ml.Signal {
+		case "STRONG_BUY", "BUY":
+			sigColor = cSuccess
+		case "STRONG_SELL", "SELL":
+			sigColor = cDanger
+		case "HOLD":
+			sigColor = cWarning
+		}
+
+		// P(rev) color based on probability
+		probColor := cDim
+		if ml.ProbRev >= 0.7 {
+			probColor = cSuccess
+		} else if ml.ProbRev >= 0.5 {
+			probColor = cWarning
+		} else {
+			probColor = cDanger
+		}
+
+		if width >= 55 {
+			buf.WriteString(fmt.Sprintf("%-8s %s%s%-4s%s  %s%5.1f%%%s  %-6s  %-6s  %s%s%s\n",
+				ml.Asset,
+				sideColor, sideIcon, ml.Side, cReset,
+				probColor, ml.ProbRev*100, cReset,
+				ml.Edge,
+				ml.EV,
+				sigColor, ml.Signal, cReset,
+			))
+		} else {
+			buf.WriteString(fmt.Sprintf("%-5s %s%-3s%s  %s%s%s\n",
+				ml.Asset,
+				sideColor, ml.Side[:3], cReset,
+				sigColor, ml.Signal, cReset,
+			))
+		}
+		row++
+	}
+}
+
 func (d *ResponsiveDash) renderLogContent(buf *strings.Builder, width, height int) {
 	if len(d.logs) == 0 {
 		buf.WriteString(cDim + "No activity yet..." + cReset)
@@ -866,6 +966,24 @@ func (d *ResponsiveDash) SetDayPnL(pnl decimal.Decimal) {
 	d.mu.Lock()
 	d.dayPnL = pnl
 	d.mu.Unlock()
+	d.triggerUpdate()
+}
+
+// UpdateMLSignal updates ML analysis for an asset
+func (d *ResponsiveDash) UpdateMLSignal(asset, side string, price decimal.Decimal, probRev float64, edge, ev, signal string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.mlSignals[asset] = &RMLSignal{
+		Asset:   asset,
+		Side:    side,
+		Price:   price,
+		ProbRev: probRev,
+		Edge:    edge,
+		EV:      ev,
+		Signal:  signal,
+	}
+
 	d.triggerUpdate()
 }
 
