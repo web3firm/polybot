@@ -95,9 +95,12 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize database (not used by scalper, but kept for future)
-	if _, dbErr := database.New(cfg.DatabasePath); dbErr != nil {
+	// Initialize database for trade logging
+	db, dbErr := database.New(cfg.DatabasePath)
+	if dbErr != nil {
 		log.Warn().Err(dbErr).Msg("Database initialization failed (continuing without)")
+	} else {
+		log.Info().Msg("📊 Database connected for trade logging")
 	}
 
 	// ====== CORE COMPONENTS ======
@@ -213,6 +216,10 @@ func main() {
 		)
 		// Link scalper to engine for price-to-beat data
 		scalper.SetEngine(arbEngines[i])
+		// Connect to database for trade logging
+		if db != nil {
+			scalper.SetDatabase(db)
+		}
 		scalper.Start()
 		scalperStrategies = append(scalperStrategies, scalper)
 		log.Info().Str("asset", asset).Bool("paper", cfg.DryRun).Msg("🎯 Scalper strategy started")

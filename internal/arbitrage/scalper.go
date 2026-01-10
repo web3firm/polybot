@@ -5,8 +5,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
+	"github.com/web3guy0/polybot/internal/database"
 	"github.com/web3guy0/polybot/internal/polymarket"
 )
 
@@ -27,6 +29,7 @@ type ScalperStrategy struct {
 	windowScanner *polymarket.WindowScanner
 	clobClient    *CLOBClient
 	engine        *Engine // Reference to engine for price-to-beat data
+	db            *database.Database // Database for trade logging
 	
 	// ML-powered dynamic thresholds
 	dynamicThreshold *DynamicThreshold
@@ -59,6 +62,7 @@ type ScalperStrategy struct {
 }
 
 type ScalpPosition struct {
+	TradeID     string // UUID for DB
 	Asset       string
 	Side        string // "UP" or "DOWN"
 	EntryPrice  decimal.Decimal
@@ -70,6 +74,16 @@ type ScalpPosition struct {
 	ConditionID string
 	TokenID     string
 	WindowID    string
+	WindowTitle string
+	
+	// ML features at entry for DB logging
+	MLProbability    decimal.Decimal
+	MLEntryThreshold decimal.Decimal
+	Volatility15m    decimal.Decimal
+	Momentum1m       decimal.Decimal
+	Momentum5m       decimal.Decimal
+	PriceAtEntry     decimal.Decimal
+	TimeRemainingMin int
 }
 
 // Scalping parameters - defaults
@@ -108,6 +122,12 @@ func NewScalperStrategy(scanner *polymarket.WindowScanner, clobClient *CLOBClien
 // SetEngine sets the arbitrage engine reference for price-to-beat data
 func (s *ScalperStrategy) SetEngine(engine *Engine) {
 	s.engine = engine
+}
+
+// SetDatabase sets the database for trade logging
+func (s *ScalperStrategy) SetDatabase(db *database.Database) {
+	s.db = db
+	log.Info().Msg("📊 [SCALP] Database connected for trade logging")
 }
 
 // EnableML enables/disables ML-powered dynamic thresholds
@@ -250,8 +270,8 @@ func (s *ScalperStrategy) findScalpOpportunity(w *polymarket.PredictionWindow) {
 			Str("dynamic_stop", dynamicStop.String()).
 			Msg("🧠 [ML] Dynamic thresholds calculated")
 
-		// Execute with ML-recommended parameters
-		s.executeEntry(w, features.CheapSide, features.CheapPrice, dynamicProfit, dynamicStop, features.RecommendedSize)
+		// Execute with ML-recommended parameters + features for DB
+		s.executeEntry(w, &features, dynamicProfit, dynamicStop)
 		return
 	}
 
@@ -377,8 +397,11 @@ func (s *ScalperStrategy) findScalpOpportunity(w *polymarket.PredictionWindow) {
 }
 
 // executeEntry executes an entry trade with ML-recommended parameters
-func (s *ScalperStrategy) executeEntry(w *polymarket.PredictionWindow, cheapSide string, cheapPrice, targetPrice, stopPrice, recommendedSize decimal.Decimal) {
+func (s *ScalperStrategy) executeEntry(w *polymarket.PredictionWindow, features *Features, targetPrice, stopPrice decimal.Decimal) {
 	asset := w.Asset
+	cheapSide := features.CheapSide
+	cheapPrice := features.CheapPrice
+	recommendedSize := features.RecommendedSize
 	
 	var tokenID string
 	if cheapSide == "UP" {
@@ -405,18 +428,40 @@ func (s *ScalperStrategy) executeEntry(w *polymarket.PredictionWindow, cheapSide
 		size = 5 // Minimum 5 shares
 	}
 
-	// Create position with dynamic targets
+	// Calculate time remaining
+	windowAge := time.Since(w.StartDate)
+	timeRemainingMin := int((15*time.Minute - windowAge).Minutes())
+	if timeRemainingMin < 0 {
+		timeRemainingMin = 0
+	}
+	
+	// Get current BTC/ETH/SOL price for reference
+	var priceAtEntry decimal.Decimal
+	if s.engine != nil {
+		priceAtEntry = s.engine.GetCurrentPrice()
+	}
+
+	// Create position with dynamic targets and ML features
 	pos := &ScalpPosition{
-		Asset:       asset,
-		Side:        cheapSide,
-		EntryPrice:  roundedPrice,
-		Size:        size,
-		EntryTime:   time.Now(),
-		TargetPrice: targetPrice,
-		StopLoss:    stopPrice,
-		ConditionID: w.ConditionID,
-		TokenID:     tokenID,
-		WindowID:    w.ID,
+		TradeID:          uuid.New().String(),
+		Asset:            asset,
+		Side:             cheapSide,
+		EntryPrice:       roundedPrice,
+		Size:             size,
+		EntryTime:        time.Now(),
+		TargetPrice:      targetPrice,
+		StopLoss:         stopPrice,
+		ConditionID:      w.ConditionID,
+		TokenID:          tokenID,
+		WindowID:         w.ID,
+		WindowTitle:      w.Question,
+		MLProbability:    features.ProfitProbability,
+		MLEntryThreshold: features.CheapPrice, // Entry price = threshold used
+		Volatility15m:    features.Volatility15m,
+		Momentum1m:       features.PriceVelocity1m,
+		Momentum5m:       features.PriceVelocity5m,
+		PriceAtEntry:     priceAtEntry,
+		TimeRemainingMin: timeRemainingMin,
 	}
 
 	actualCost := roundedPrice.Mul(decimal.NewFromInt(size))
@@ -431,6 +476,7 @@ func (s *ScalperStrategy) executeEntry(w *polymarket.PredictionWindow, cheapSide
 		Int64("size", size).
 		Str("cost", actualCost.String()).
 		Str("potential_profit", potentialProfit.String()).
+		Str("P(profit)", features.ProfitProbability.StringFixed(2)).
 		Bool("ml_mode", true).
 		Msg("🧠 [ML] INTELLIGENT ENTRY")
 
@@ -557,6 +603,10 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 		// Paper trade - just track it
 		if side == "BUY" {
 			s.positions[pos.Asset] = pos
+			
+			// Save entry to database
+			s.saveEntryToDB(pos, "")
+			
 			log.Info().Str("asset", pos.Asset).Msg("📝 [SCALP] Paper BUY recorded")
 		} else {
 			// Calculate P&L
@@ -571,13 +621,20 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 			// Record outcome for ML learning
 			s.dynamicThreshold.RecordTradeOutcome(pos.Asset, pos.EntryPrice, won, pnl)
 			
+			// Determine exit type
+			exitType := s.determineExitType(pos, currentPrice)
+			
+			// Update database with exit
+			s.saveExitToDB(pos, "", orderPrice, pnl, exitType)
+			
 			delete(s.positions, pos.Asset)
 			log.Info().
 				Str("asset", pos.Asset).
 				Str("pnl", pnl.String()).
 				Str("total_profit", s.totalProfit.String()).
 				Bool("won", won).
-				Msg("📝 [SCALP] Paper SELL recorded (ML updated)")
+				Str("exit_type", exitType).
+				Msg("📝 [SCALP] Paper SELL recorded (ML + DB updated)")
 		}
 		return
 	}
@@ -604,6 +661,10 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 	if side == "BUY" {
 		pos.OrderID = orderID
 		s.positions[pos.Asset] = pos
+		
+		// Save entry to database
+		s.saveEntryToDB(pos, orderID)
+		
 		log.Info().
 			Str("order_id", orderID).
 			Str("asset", pos.Asset).
@@ -621,6 +682,12 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 		// Record outcome for ML learning
 		s.dynamicThreshold.RecordTradeOutcome(pos.Asset, pos.EntryPrice, won, pnl)
 		
+		// Determine exit type
+		exitType := s.determineExitType(pos, currentPrice)
+		
+		// Update database with exit
+		s.saveExitToDB(pos, orderID, orderPrice, pnl, exitType)
+		
 		delete(s.positions, pos.Asset)
 		log.Info().
 			Str("order_id", orderID).
@@ -629,8 +696,122 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 			Str("total_profit", s.totalProfit.String()).
 			Int("wins", s.winningTrades).
 			Int("total", s.totalTrades).
+			Str("exit_type", exitType).
 			Bool("ml_updated", true).
-			Msg("✅ [SCALP] SELL order placed! (ML learning updated)")
+			Msg("✅ [SCALP] SELL order placed! (ML + DB updated)")
+	}
+}
+
+// determineExitType figures out why we exited
+func (s *ScalperStrategy) determineExitType(pos *ScalpPosition, currentPrice decimal.Decimal) string {
+	holdTime := time.Since(pos.EntryTime)
+	profitPct := currentPrice.Sub(pos.EntryPrice).Div(pos.EntryPrice)
+	
+	if currentPrice.GreaterThanOrEqual(pos.TargetPrice) {
+		return "profit_target"
+	}
+	if profitPct.GreaterThanOrEqual(decimal.NewFromFloat(0.50)) {
+		return "early_exit"
+	}
+	if currentPrice.LessThanOrEqual(pos.StopLoss) {
+		return "stop_loss"
+	}
+	if holdTime > 3*time.Minute {
+		return "timeout"
+	}
+	return "manual"
+}
+
+// saveEntryToDB saves an entry trade to the database
+func (s *ScalperStrategy) saveEntryToDB(pos *ScalpPosition, orderID string) {
+	if s.db == nil {
+		return
+	}
+	
+	entryCost := pos.EntryPrice.Mul(decimal.NewFromInt(pos.Size))
+	
+	trade := &database.ScalpTrade{
+		TradeID:          pos.TradeID,
+		Asset:            pos.Asset,
+		WindowID:         pos.WindowID,
+		WindowTitle:      pos.WindowTitle,
+		Side:             pos.Side,
+		TokenID:          pos.TokenID,
+		EntryPrice:       pos.EntryPrice,
+		EntrySize:        pos.Size,
+		EntryCost:        entryCost,
+		EntryTime:        pos.EntryTime,
+		EntryOrderID:     orderID,
+		MLProbability:    pos.MLProbability,
+		MLEntryThreshold: pos.MLEntryThreshold,
+		MLProfitTarget:   pos.TargetPrice,
+		MLStopLoss:       pos.StopLoss,
+		Volatility15m:    pos.Volatility15m,
+		Momentum1m:       pos.Momentum1m,
+		Momentum5m:       pos.Momentum5m,
+		PriceAtEntry:     pos.PriceAtEntry,
+		TimeRemainingMin: pos.TimeRemainingMin,
+		Status:           "OPEN",
+	}
+	
+	if err := s.db.SaveScalpTrade(trade); err != nil {
+		log.Error().Err(err).Str("asset", pos.Asset).Msg("❌ Failed to save entry to DB")
+	} else {
+		log.Debug().Str("trade_id", pos.TradeID).Msg("📊 Entry saved to DB")
+	}
+}
+
+// saveExitToDB updates the trade with exit info
+func (s *ScalperStrategy) saveExitToDB(pos *ScalpPosition, orderID string, exitPrice, pnl decimal.Decimal, exitType string) {
+	if s.db == nil {
+		return
+	}
+	
+	// Fetch the existing trade
+	trade, err := s.db.GetScalpTrade(pos.TradeID)
+	if err != nil {
+		log.Error().Err(err).Str("trade_id", pos.TradeID).Msg("❌ Failed to find trade in DB")
+		return
+	}
+	
+	// Update exit fields
+	exitTime := time.Now()
+	exitValue := exitPrice.Mul(decimal.NewFromInt(pos.Size))
+	profitPct := decimal.Zero
+	if !pos.EntryPrice.IsZero() {
+		profitPct = pnl.Div(pos.EntryPrice.Mul(decimal.NewFromInt(pos.Size))).Mul(decimal.NewFromInt(100))
+	}
+	
+	trade.ExitPrice = exitPrice
+	trade.ExitSize = pos.Size
+	trade.ExitValue = exitValue
+	trade.ExitTime = &exitTime
+	trade.ExitOrderID = orderID
+	trade.ExitType = exitType
+	trade.ProfitLoss = pnl
+	trade.ProfitPct = profitPct
+	trade.Status = "CLOSED"
+	
+	if err := s.db.UpdateScalpTrade(trade); err != nil {
+		log.Error().Err(err).Str("trade_id", pos.TradeID).Msg("❌ Failed to update exit in DB")
+	} else {
+		log.Debug().
+			Str("trade_id", pos.TradeID).
+			Str("pnl", pnl.String()).
+			Str("exit_type", exitType).
+			Msg("📊 Exit saved to DB")
+	}
+	
+	// Update ML learning and daily stats
+	won := pnl.GreaterThan(decimal.Zero)
+	priceBucket := int(pos.EntryPrice.Mul(decimal.NewFromInt(100)).IntPart()) // 0.08 -> 8
+	
+	if err := s.db.UpdateMLLearning(pos.Asset, priceBucket, pnl, won); err != nil {
+		log.Warn().Err(err).Msg("⚠️ Failed to update ML learning")
+	}
+	
+	if err := s.db.UpdateDailyStats(pnl, pos.Asset, won); err != nil {
+		log.Warn().Err(err).Msg("⚠️ Failed to update daily stats")
 	}
 }
 

@@ -111,6 +111,55 @@ type UserSettings struct {
 	UpdatedAt       time.Time
 }
 
+// ScalpTrade represents a scalping trade with ML features
+type ScalpTrade struct {
+	TradeID      string `gorm:"column:trade_id;primaryKey"`
+	Asset        string `gorm:"column:asset;index"`
+	WindowID     string `gorm:"column:window_id"`
+	WindowTitle  string `gorm:"column:window_title"`
+	Side         string `gorm:"column:side"`      // "UP" or "DOWN"
+	TokenID      string `gorm:"column:token_id"`
+
+	// Entry
+	EntryPrice   decimal.Decimal `gorm:"column:entry_price;type:decimal(20,6)"`
+	EntrySize    int64           `gorm:"column:entry_size"`
+	EntryCost    decimal.Decimal `gorm:"column:entry_cost;type:decimal(20,6)"`
+	EntryTime    time.Time       `gorm:"column:entry_time"`
+	EntryOrderID string          `gorm:"column:entry_order_id"`
+
+	// Exit
+	ExitPrice    decimal.Decimal `gorm:"column:exit_price;type:decimal(20,6)"`
+	ExitSize     int64           `gorm:"column:exit_size"`
+	ExitValue    decimal.Decimal `gorm:"column:exit_value;type:decimal(20,6)"`
+	ExitTime     *time.Time      `gorm:"column:exit_time"`
+	ExitOrderID  string          `gorm:"column:exit_order_id"`
+	ExitType     string          `gorm:"column:exit_type"` // profit_target, early_exit, stop_loss, timeout
+
+	// P&L
+	ProfitLoss   decimal.Decimal `gorm:"column:profit_loss;type:decimal(20,6)"`
+	ProfitPct    decimal.Decimal `gorm:"column:profit_pct;type:decimal(10,4)"`
+
+	// ML Features at Entry
+	MLProbability    decimal.Decimal `gorm:"column:ml_probability;type:decimal(10,4)"`
+	MLEntryThreshold decimal.Decimal `gorm:"column:ml_entry_threshold;type:decimal(10,4)"`
+	MLProfitTarget   decimal.Decimal `gorm:"column:ml_profit_target;type:decimal(10,4)"`
+	MLStopLoss       decimal.Decimal `gorm:"column:ml_stop_loss;type:decimal(10,4)"`
+	Volatility15m    decimal.Decimal `gorm:"column:volatility_15m;type:decimal(10,6)"`
+	Momentum1m       decimal.Decimal `gorm:"column:momentum_1m;type:decimal(10,6)"`
+	Momentum5m       decimal.Decimal `gorm:"column:momentum_5m;type:decimal(10,6)"`
+	PriceAtEntry     decimal.Decimal `gorm:"column:price_at_entry;type:decimal(20,6)"`
+	TimeRemainingMin int             `gorm:"column:time_remaining_min"`
+
+	// Status
+	Status    string    `gorm:"column:status;index"` // OPEN, CLOSED, EXPIRED
+	CreatedAt time.Time `gorm:"column:created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
+}
+
+func (ScalpTrade) TableName() string {
+	return "scalp_trades"
+}
+
 func New(dbPath string) (*Database, error) {
 	var db *gorm.DB
 	var err error
@@ -338,4 +387,133 @@ func (d *Database) GetArbTradeStats() (map[string]interface{}, error) {
 	stats["by_asset"] = assetStats
 
 	return stats, nil
+}
+
+// ============ SCALP TRADE OPERATIONS ============
+
+// SaveScalpTrade saves a new scalp trade entry
+func (d *Database) SaveScalpTrade(trade *ScalpTrade) error {
+	trade.CreatedAt = time.Now()
+	trade.UpdatedAt = time.Now()
+	return d.db.Create(trade).Error
+}
+
+// UpdateScalpTrade updates an existing scalp trade (e.g., on exit)
+func (d *Database) UpdateScalpTrade(trade *ScalpTrade) error {
+	trade.UpdatedAt = time.Now()
+	return d.db.Save(trade).Error
+}
+
+// GetOpenScalpTrades gets all OPEN scalp trades
+func (d *Database) GetOpenScalpTrades() ([]ScalpTrade, error) {
+	var trades []ScalpTrade
+	err := d.db.Where("status = ?", "OPEN").Find(&trades).Error
+	return trades, err
+}
+
+// GetScalpTrade retrieves a scalp trade by ID
+func (d *Database) GetScalpTrade(tradeID string) (*ScalpTrade, error) {
+	var trade ScalpTrade
+	err := d.db.First(&trade, "trade_id = ?", tradeID).Error
+	return &trade, err
+}
+
+// GetRecentScalpTrades gets recent scalp trades
+func (d *Database) GetRecentScalpTrades(limit int) ([]ScalpTrade, error) {
+	var trades []ScalpTrade
+	err := d.db.Order("created_at DESC").Limit(limit).Find(&trades).Error
+	return trades, err
+}
+
+// GetScalpTradeStats gets aggregate statistics
+func (d *Database) GetScalpTradeStats() (map[string]interface{}, error) {
+	stats := make(map[string]interface{})
+
+	var totalCount int64
+	d.db.Model(&ScalpTrade{}).Count(&totalCount)
+	stats["total_trades"] = totalCount
+
+	var closedCount int64
+	d.db.Model(&ScalpTrade{}).Where("status = ?", "CLOSED").Count(&closedCount)
+	stats["closed_trades"] = closedCount
+
+	var openCount int64
+	d.db.Model(&ScalpTrade{}).Where("status = ?", "OPEN").Count(&openCount)
+	stats["open_trades"] = openCount
+
+	// Total P&L
+	var profitResult struct {
+		Total decimal.Decimal
+	}
+	d.db.Model(&ScalpTrade{}).Where("status = ?", "CLOSED").Select("COALESCE(SUM(profit_loss), 0) as total").Scan(&profitResult)
+	stats["total_profit"] = profitResult.Total
+
+	// Win rate
+	var winCount int64
+	d.db.Model(&ScalpTrade{}).Where("status = ? AND profit_loss > 0", "CLOSED").Count(&winCount)
+	if closedCount > 0 {
+		stats["win_rate"] = float64(winCount) / float64(closedCount)
+	} else {
+		stats["win_rate"] = 0.0
+	}
+
+	return stats, nil
+}
+
+// UpdateMLLearning updates the ml_learning table with trade outcome
+func (d *Database) UpdateMLLearning(asset string, priceBucket int, profit decimal.Decimal, won bool) error {
+	// Using raw SQL since this table has UPSERT logic
+	sql := `
+		INSERT INTO ml_learning (asset, price_bucket, total_trades, winning_trades, total_profit, updated_at)
+		VALUES ($1, $2, 1, $3, $4, NOW())
+		ON CONFLICT (asset, price_bucket) DO UPDATE SET
+			total_trades = ml_learning.total_trades + 1,
+			winning_trades = ml_learning.winning_trades + $3,
+			total_profit = ml_learning.total_profit + $4,
+			win_rate = (ml_learning.winning_trades + $3)::DECIMAL / (ml_learning.total_trades + 1),
+			updated_at = NOW()
+	`
+	winInt := 0
+	if won {
+		winInt = 1
+	}
+	return d.db.Exec(sql, asset, priceBucket, winInt, profit).Error
+}
+
+// UpdateDailyStats updates the daily_stats table
+func (d *Database) UpdateDailyStats(profit decimal.Decimal, asset string, won bool) error {
+	today := time.Now().Format("2006-01-02")
+	winInt := 0
+	loseInt := 0
+	if won {
+		winInt = 1
+	} else {
+		loseInt = 1
+	}
+	
+	// Build asset-specific columns
+	assetTradesCol := "btc_trades"
+	assetProfitCol := "btc_profit"
+	switch asset {
+	case "ETH":
+		assetTradesCol = "eth_trades"
+		assetProfitCol = "eth_profit"
+	case "SOL":
+		assetTradesCol = "sol_trades"
+		assetProfitCol = "sol_profit"
+	}
+
+	sql := `
+		INSERT INTO daily_stats (date, total_trades, winning_trades, losing_trades, total_profit, ` + assetTradesCol + `, ` + assetProfitCol + `)
+		VALUES ($1, 1, $2, $3, $4, 1, $4)
+		ON CONFLICT (date) DO UPDATE SET
+			total_trades = daily_stats.total_trades + 1,
+			winning_trades = daily_stats.winning_trades + $2,
+			losing_trades = daily_stats.losing_trades + $3,
+			total_profit = daily_stats.total_profit + $4,
+			` + assetTradesCol + ` = daily_stats.` + assetTradesCol + ` + 1,
+			` + assetProfitCol + ` = daily_stats.` + assetProfitCol + ` + $4,
+			updated_at = NOW()
+	`
+	return d.db.Exec(sql, today, winInt, loseInt, profit).Error
 }
