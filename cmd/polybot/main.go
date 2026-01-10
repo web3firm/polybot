@@ -40,10 +40,14 @@ const version = "5.0.0" // Mean Reversion Swing Trading
 func main() {
 	// Check for dashboard mode FIRST (before setting up zerolog)
 	useDashboard := false
-	useSwing := false // New: Mean reversion swing trading
+	useResponsive := false // New: Responsive professional dashboard
+	useSwing := false      // Mean reversion swing trading
 	for _, arg := range os.Args[1:] {
 		if arg == "--dashboard" || arg == "-d" {
 			useDashboard = true
+		}
+		if arg == "--responsive" || arg == "-r" {
+			useResponsive = true
 		}
 		if arg == "--swing" || arg == "-s" {
 			useSwing = true
@@ -52,12 +56,24 @@ func main() {
 
 	// Create professional dashboard (institutional grade)
 	var proDash *dashboard.ProDashboard
-	if useDashboard {
+	var respDash *dashboard.ResponsiveDash
+	
+	if useResponsive {
+		strategyName := "SCALPER"
+		if useSwing {
+			strategyName = "SWING"
+		}
+		respDash = dashboard.NewResponsiveDash(strategyName)
+	} else if useDashboard {
 		proDash = dashboard.NewProDashboard()
 	}
 
 	// Setup logging - route to dashboard if enabled
-	if useDashboard && proDash != nil {
+	if useResponsive && respDash != nil {
+		// Silent mode - logs go to responsive dashboard
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		log.Logger = log.Output(respDash.Writer())
+	} else if useDashboard && proDash != nil {
 		// Silent mode - logs go to dashboard
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 		log.Logger = log.Output(proDash.Writer())
@@ -305,14 +321,18 @@ func main() {
 		if useSwing && i < len(swingStrategies) {
 			// Using swing strategy
 			swingStrategies[i].SetNotifier(telegramBot)
-			if proDash != nil {
+			if respDash != nil {
+				swingStrategies[i].SetResponsiveDashboard(respDash)
+			} else if proDash != nil {
 				swingStrategies[i].SetDashboard(proDash)
 			}
 		} else if !useSwing && i < len(scalperStrategies) {
 			// Using scalper strategy
 			telegramBot.AddScalper(asset, scalperStrategies[i])
 			scalperStrategies[i].SetNotifier(telegramBot)
-			if proDash != nil {
+			if respDash != nil {
+				scalperStrategies[i].SetResponsiveDashboard(respDash)
+			} else if proDash != nil {
 				scalperStrategies[i].SetProDashboard(proDash)
 			}
 		}
@@ -320,8 +340,10 @@ func main() {
 
 	go telegramBot.Start()
 	
-	// Start professional dashboard if enabled
-	if proDash != nil {
+	// Start dashboard if enabled
+	if respDash != nil {
+		respDash.Start()
+	} else if proDash != nil {
 		proDash.Start()
 	}
 

@@ -1,0 +1,916 @@
+package dashboard
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/shopspring/decimal"
+	"golang.org/x/term"
+)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESPONSIVE PROFESSIONAL DASHBOARD - Institutional Grade
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Features:
+// - Auto-detects terminal size
+// - Responsive layout (adapts to any screen)
+// - Smooth updates without flicker
+// - Professional color scheme
+// - Real-time metrics
+
+// Layout modes based on terminal width
+type LayoutMode int
+
+const (
+	LayoutCompact LayoutMode = iota // < 80 cols: stacked panels
+	LayoutMedium                    // 80-120 cols: 2 columns
+	LayoutWide                      // 120-160 cols: 3 columns
+	LayoutUltra                     // 160+ cols: 4 columns
+)
+
+// Color scheme - Institutional dark theme
+const (
+	// Base colors
+	cReset     = "\033[0m"
+	cBold      = "\033[1m"
+	cDim       = "\033[2m"
+	cUnderline = "\033[4m"
+
+	// Theme colors
+	cPrimary   = "\033[38;5;75m"  // Bright blue
+	cSecondary = "\033[38;5;248m" // Gray
+	cAccent    = "\033[38;5;220m" // Gold
+	cSuccess   = "\033[38;5;82m"  // Green
+	cDanger    = "\033[38;5;196m" // Red
+	cWarning   = "\033[38;5;214m" // Orange
+	cInfo      = "\033[38;5;39m"  // Cyan
+
+	// Background
+	cBgPanel  = "\033[48;5;236m" // Dark gray
+	cBgHeader = "\033[48;5;24m"  // Dark blue
+	cBgRow    = "\033[48;5;235m" // Slightly lighter
+
+	// Box drawing - rounded corners for modern look
+	boxTL = "╭"
+	boxTR = "╮"
+	boxBL = "╰"
+	boxBR = "╯"
+	boxH  = "─"
+	boxV  = "│"
+	boxHB = "━" // Bold horizontal
+	boxVB = "┃" // Bold vertical
+
+	// Status indicators
+	dotFilled = "●"
+	dotEmpty  = "○"
+	arrowUp   = "▲"
+	arrowDown = "▼"
+	barFull   = "█"
+	barEmpty  = "░"
+)
+
+// ResponsiveDash is a professional responsive terminal dashboard
+type ResponsiveDash struct {
+	mu sync.RWMutex
+
+	// Terminal dimensions
+	width  int
+	height int
+	layout LayoutMode
+
+	// State
+	startTime time.Time
+	running   bool
+	stopCh    chan struct{}
+	updateCh  chan struct{}
+
+	// Data
+	markets   map[string]*RMarketData
+	positions map[string]*RPositionData
+	signals   []RSignalData
+	logs      []string
+
+	// Stats
+	totalTrades   int
+	winningTrades int
+	totalPnL      decimal.Decimal
+	balance       decimal.Decimal
+	dayPnL        decimal.Decimal
+
+	// Strategy info
+	strategyName string
+	strategyMode string
+}
+
+// RMarketData holds market information
+type RMarketData struct {
+	Asset       string
+	LivePrice   decimal.Decimal
+	PriceToBeat decimal.Decimal
+	UpOdds      decimal.Decimal
+	DownOdds    decimal.Decimal
+	Spread      decimal.Decimal
+	Volume24h   decimal.Decimal
+	UpdatedAt   time.Time
+}
+
+// RPositionData holds position information
+type RPositionData struct {
+	Asset      string
+	Side       string
+	EntryPrice decimal.Decimal
+	Current    decimal.Decimal
+	Size       int64
+	PnL        decimal.Decimal
+	PnLPct     float64
+	Status     string
+	HoldTime   time.Duration
+}
+
+// RSignalData holds signal information
+type RSignalData struct {
+	Time       time.Time
+	Asset      string
+	Side       string
+	Type       string // "BUY", "SELL", "SIGNAL"
+	Price      decimal.Decimal
+	Reason     string
+	Confidence float64
+}
+
+// NewResponsiveDash creates a new responsive dashboard
+func NewResponsiveDash(strategyName string) *ResponsiveDash {
+	return &ResponsiveDash{
+		startTime:    time.Now(),
+		stopCh:       make(chan struct{}),
+		updateCh:     make(chan struct{}, 10),
+		markets:      make(map[string]*RMarketData),
+		positions:    make(map[string]*RPositionData),
+		signals:      make([]RSignalData, 0, 50),
+		logs:         make([]string, 0, 100),
+		totalPnL:     decimal.Zero,
+		balance:      decimal.Zero,
+		dayPnL:       decimal.Zero,
+		strategyName: strategyName,
+		strategyMode: "LIVE",
+	}
+}
+
+// Start begins the dashboard render loop
+func (d *ResponsiveDash) Start() {
+	d.mu.Lock()
+	if d.running {
+		d.mu.Unlock()
+		return
+	}
+	d.running = true
+	d.mu.Unlock()
+
+	// Get initial terminal size
+	d.updateTerminalSize()
+
+	// Hide cursor, clear screen
+	fmt.Print("\033[?25l") // Hide cursor
+	fmt.Print("\033[2J")   // Clear screen
+
+	go d.renderLoop()
+	go d.sizeMonitor()
+}
+
+// Stop halts the dashboard
+func (d *ResponsiveDash) Stop() {
+	d.mu.Lock()
+	if !d.running {
+		d.mu.Unlock()
+		return
+	}
+	d.running = false
+	d.mu.Unlock()
+
+	close(d.stopCh)
+
+	// Show cursor, reset terminal
+	fmt.Print("\033[?25h") // Show cursor
+	fmt.Print("\033[0m")   // Reset colors
+}
+
+// updateTerminalSize gets current terminal dimensions
+func (d *ResponsiveDash) updateTerminalSize() {
+	width, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		width = 120
+		height = 40
+	}
+
+	d.mu.Lock()
+	d.width = width
+	d.height = height
+
+	// Determine layout mode
+	switch {
+	case width < 80:
+		d.layout = LayoutCompact
+	case width < 120:
+		d.layout = LayoutMedium
+	case width < 160:
+		d.layout = LayoutWide
+	default:
+		d.layout = LayoutUltra
+	}
+	d.mu.Unlock()
+}
+
+// sizeMonitor watches for terminal resize
+func (d *ResponsiveDash) sizeMonitor() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.stopCh:
+			return
+		case <-ticker.C:
+			oldWidth, oldHeight := d.width, d.height
+			d.updateTerminalSize()
+			if d.width != oldWidth || d.height != oldHeight {
+				// Terminal resized - trigger full redraw
+				fmt.Print("\033[2J") // Clear screen
+				d.triggerUpdate()
+			}
+		}
+	}
+}
+
+// renderLoop is the main render loop
+func (d *ResponsiveDash) renderLoop() {
+	// Initial render
+	d.render()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.stopCh:
+			return
+		case <-d.updateCh:
+			d.render()
+		case <-ticker.C:
+			d.render()
+		}
+	}
+}
+
+// render draws the entire dashboard
+func (d *ResponsiveDash) render() {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var buf strings.Builder
+	buf.Grow(d.width * d.height * 2) // Pre-allocate
+
+	// Move to home position
+	buf.WriteString("\033[H")
+
+	// Draw based on layout
+	switch d.layout {
+	case LayoutCompact:
+		d.renderCompact(&buf)
+	case LayoutMedium:
+		d.renderMedium(&buf)
+	case LayoutWide:
+		d.renderWide(&buf)
+	default:
+		d.renderUltra(&buf)
+	}
+
+	// Output entire buffer at once (prevents flicker)
+	fmt.Print(buf.String())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LAYOUT RENDERERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+func (d *ResponsiveDash) renderCompact(buf *strings.Builder) {
+	// Compact: Single column, essential info only
+	d.drawHeader(buf, d.width)
+	d.drawStatsBar(buf, d.width)
+	d.drawPanel(buf, "POSITIONS", 0, 4, d.width, 8, d.renderPositionsContent)
+	d.drawPanel(buf, "SIGNALS", 0, 13, d.width, 6, d.renderSignalsContent)
+	d.drawStatusBar(buf, d.width, d.height)
+}
+
+func (d *ResponsiveDash) renderMedium(buf *strings.Builder) {
+	// Medium: 2 columns
+	leftW := d.width / 2
+	rightW := d.width - leftW
+
+	d.drawHeader(buf, d.width)
+	d.drawStatsBar(buf, d.width)
+
+	// Left column: Market + Positions
+	d.drawPanel(buf, "MARKET", 0, 4, leftW, 10, d.renderMarketContent)
+	d.drawPanel(buf, "POSITIONS", 0, 15, leftW, 10, d.renderPositionsContent)
+
+	// Right column: Signals + Log
+	d.drawPanel(buf, "SIGNALS", leftW, 4, rightW, 10, d.renderSignalsContent)
+	d.drawPanel(buf, "ACTIVITY", leftW, 15, rightW, 10, d.renderLogContent)
+
+	d.drawStatusBar(buf, d.width, d.height)
+}
+
+func (d *ResponsiveDash) renderWide(buf *strings.Builder) {
+	// Wide: 3 columns
+	col1W := d.width / 3
+	col2W := d.width / 3
+	col3W := d.width - col1W - col2W
+
+	d.drawHeader(buf, d.width)
+	d.drawStatsBar(buf, d.width)
+
+	// Column 1: Market data
+	d.drawPanel(buf, "MARKET DATA", 0, 4, col1W, d.height-8, d.renderMarketContent)
+
+	// Column 2: Positions
+	d.drawPanel(buf, "POSITIONS", col1W, 4, col2W, (d.height-8)/2, d.renderPositionsContent)
+	d.drawPanel(buf, "SIGNALS", col1W, 4+(d.height-8)/2, col2W, (d.height-8)/2, d.renderSignalsContent)
+
+	// Column 3: Activity log
+	d.drawPanel(buf, "ACTIVITY LOG", col1W+col2W, 4, col3W, d.height-8, d.renderLogContent)
+
+	d.drawStatusBar(buf, d.width, d.height)
+}
+
+func (d *ResponsiveDash) renderUltra(buf *strings.Builder) {
+	// Ultra wide: 4 columns with detailed view
+	colW := d.width / 4
+
+	d.drawHeader(buf, d.width)
+	d.drawStatsBar(buf, d.width)
+
+	d.drawPanel(buf, "MARKET DATA", 0, 4, colW, d.height-8, d.renderMarketContent)
+	d.drawPanel(buf, "POSITIONS", colW, 4, colW, d.height-8, d.renderPositionsContent)
+	d.drawPanel(buf, "SIGNALS", colW*2, 4, colW, d.height-8, d.renderSignalsContent)
+	d.drawPanel(buf, "ACTIVITY LOG", colW*3, 4, colW, d.height-8, d.renderLogContent)
+
+	d.drawStatusBar(buf, d.width, d.height)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPONENT RENDERERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+func (d *ResponsiveDash) drawHeader(buf *strings.Builder, width int) {
+	// Header bar
+	buf.WriteString(cBgHeader + cBold)
+
+	title := fmt.Sprintf(" 🤖 POLYBOT %s ", d.strategyName)
+	mode := fmt.Sprintf(" %s ", d.strategyMode)
+	uptime := fmt.Sprintf(" ⏱ %s ", d.formatDuration(time.Since(d.startTime)))
+
+	// Center title
+	padding := width - len(title) - len(mode) - len(uptime) - 4
+	if padding < 0 {
+		padding = 0
+	}
+
+	buf.WriteString(cPrimary + title)
+	buf.WriteString(strings.Repeat(" ", padding/2))
+	buf.WriteString(cAccent + mode)
+	buf.WriteString(strings.Repeat(" ", padding-padding/2))
+	buf.WriteString(cSecondary + uptime)
+	buf.WriteString(cReset + "\n")
+}
+
+func (d *ResponsiveDash) drawStatsBar(buf *strings.Builder, width int) {
+	// Stats bar with key metrics
+	buf.WriteString(cBgPanel)
+
+	// Calculate win rate
+	winRate := 0.0
+	if d.totalTrades > 0 {
+		winRate = float64(d.winningTrades) / float64(d.totalTrades) * 100
+	}
+
+	// Format P&L with color
+	pnlColor := cSuccess
+	pnlSign := "+"
+	if d.totalPnL.LessThan(decimal.Zero) {
+		pnlColor = cDanger
+		pnlSign = ""
+	}
+
+	dayPnlColor := cSuccess
+	dayPnlSign := "+"
+	if d.dayPnL.LessThan(decimal.Zero) {
+		dayPnlColor = cDanger
+		dayPnlSign = ""
+	}
+
+	stats := fmt.Sprintf(
+		" %s💰 Balance: $%.2f%s │ %sP&L: %s$%.2f%s │ %sToday: %s$%.2f%s │ %s📊 Trades: %d (%d W)%s │ %s🎯 Win: %.1f%%%s ",
+		cSecondary, d.balance.InexactFloat64(), cReset+cBgPanel,
+		cSecondary, pnlColor+pnlSign, d.totalPnL.InexactFloat64(), cReset+cBgPanel,
+		cSecondary, dayPnlColor+dayPnlSign, d.dayPnL.InexactFloat64(), cReset+cBgPanel,
+		cSecondary, d.totalTrades, d.winningTrades, cReset+cBgPanel,
+		cSecondary, winRate, cReset+cBgPanel,
+	)
+
+	// Pad to width
+	visibleLen := d.visibleLen(stats)
+	if visibleLen < width {
+		stats += strings.Repeat(" ", width-visibleLen)
+	}
+
+	buf.WriteString(stats)
+	buf.WriteString(cReset + "\n")
+}
+
+func (d *ResponsiveDash) drawPanel(buf *strings.Builder, title string, x, y, width, height int, contentFn func(*strings.Builder, int, int)) {
+	if width < 10 || height < 4 {
+		return
+	}
+
+	// Move to position
+	buf.WriteString(fmt.Sprintf("\033[%d;%dH", y+1, x+1))
+
+	// Top border with title
+	buf.WriteString(cPrimary + boxTL)
+	titleStr := fmt.Sprintf(" %s ", title)
+	remaining := width - 2 - len(titleStr)
+	if remaining > 0 {
+		buf.WriteString(strings.Repeat(boxH, 2))
+		buf.WriteString(cAccent + cBold + titleStr + cReset + cPrimary)
+		buf.WriteString(strings.Repeat(boxH, remaining-2))
+	}
+	buf.WriteString(boxTR + cReset)
+
+	// Content area
+	contentBuf := &strings.Builder{}
+	contentFn(contentBuf, width-4, height-2)
+	contentLines := strings.Split(contentBuf.String(), "\n")
+
+	for i := 0; i < height-2; i++ {
+		buf.WriteString(fmt.Sprintf("\033[%d;%dH", y+2+i, x+1))
+		buf.WriteString(cPrimary + boxV + cReset)
+
+		content := ""
+		if i < len(contentLines) {
+			content = contentLines[i]
+		}
+
+		// Pad content to panel width
+		visLen := d.visibleLen(content)
+		padding := width - 4 - visLen
+		if padding < 0 {
+			padding = 0
+			// Truncate content
+			content = d.truncate(content, width-4)
+		}
+
+		buf.WriteString(" " + content + strings.Repeat(" ", padding) + " ")
+		buf.WriteString(cPrimary + boxV + cReset)
+	}
+
+	// Bottom border
+	buf.WriteString(fmt.Sprintf("\033[%d;%dH", y+height, x+1))
+	buf.WriteString(cPrimary + boxBL + strings.Repeat(boxH, width-2) + boxBR + cReset)
+}
+
+func (d *ResponsiveDash) drawStatusBar(buf *strings.Builder, width, height int) {
+	buf.WriteString(fmt.Sprintf("\033[%d;1H", height))
+	buf.WriteString(cBgHeader + cDim)
+
+	now := time.Now().Format("15:04:05")
+	help := "q:Quit │ h:Help │ r:Refresh"
+	layout := fmt.Sprintf("%dx%d %s", width, height, d.layoutName())
+
+	content := fmt.Sprintf(" %s │ %s │ %s ", now, help, layout)
+	padding := width - len(content)
+	if padding < 0 {
+		padding = 0
+	}
+
+	buf.WriteString(content)
+	buf.WriteString(strings.Repeat(" ", padding))
+	buf.WriteString(cReset)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONTENT RENDERERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height int) {
+	if len(d.markets) == 0 {
+		buf.WriteString(cDim + "No market data..." + cReset)
+		return
+	}
+
+	// Header
+	if width >= 50 {
+		buf.WriteString(fmt.Sprintf("%sASSET    LIVE      P2B       UP     DOWN    SPR%s\n",
+			cSecondary+cUnderline, cReset))
+	} else {
+		buf.WriteString(fmt.Sprintf("%sASSET  UP   DOWN%s\n", cSecondary+cUnderline, cReset))
+	}
+
+	row := 0
+	for _, m := range d.markets {
+		if row >= height-1 {
+			break
+		}
+
+		// Determine trend indicator
+		trend := " "
+		if m.LivePrice.GreaterThan(m.PriceToBeat) {
+			trend = cSuccess + arrowUp + cReset
+		} else if m.LivePrice.LessThan(m.PriceToBeat) {
+			trend = cDanger + arrowDown + cReset
+		}
+
+		// Stale indicator
+		stale := ""
+		if time.Since(m.UpdatedAt) > 5*time.Second {
+			stale = cWarning + " ⚠" + cReset
+		}
+
+		if width >= 50 {
+			buf.WriteString(fmt.Sprintf("%-8s %s$%-8.2f $%-8.2f %s%-5.0f%s %s%-5.0f%s %.0f¢%s\n",
+				m.Asset,
+				trend,
+				m.LivePrice.InexactFloat64(),
+				m.PriceToBeat.InexactFloat64(),
+				cSuccess, m.UpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
+				cDanger, m.DownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
+				m.Spread.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+				stale,
+			))
+		} else {
+			buf.WriteString(fmt.Sprintf("%-6s %s%.0f%s %s%.0f%s\n",
+				m.Asset,
+				cSuccess, m.UpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
+				cDanger, m.DownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
+			))
+		}
+		row++
+	}
+}
+
+func (d *ResponsiveDash) renderPositionsContent(buf *strings.Builder, width, height int) {
+	if len(d.positions) == 0 {
+		buf.WriteString(cDim + "No open positions" + cReset)
+		return
+	}
+
+	// Header
+	if width >= 60 {
+		buf.WriteString(fmt.Sprintf("%sASSET    SIDE   ENTRY   CURR    SIZE   P&L      TIME%s\n",
+			cSecondary+cUnderline, cReset))
+	} else {
+		buf.WriteString(fmt.Sprintf("%sASSET SIDE  P&L%s\n", cSecondary+cUnderline, cReset))
+	}
+
+	row := 0
+	for _, p := range d.positions {
+		if row >= height-1 {
+			break
+		}
+
+		// P&L color
+		pnlColor := cSuccess
+		pnlSign := "+"
+		if p.PnL.LessThan(decimal.Zero) {
+			pnlColor = cDanger
+			pnlSign = ""
+		}
+
+		// Side color
+		sideColor := cSuccess
+		if p.Side == "DOWN" {
+			sideColor = cDanger
+		}
+
+		// Status indicator
+		status := dotFilled
+		switch p.Status {
+		case "OPEN":
+			status = cSuccess + dotFilled + cReset
+		case "CLOSING":
+			status = cWarning + dotFilled + cReset
+		case "STOP":
+			status = cDanger + dotFilled + cReset
+		}
+
+		if width >= 60 {
+			buf.WriteString(fmt.Sprintf("%s %-8s %s%-6s%s %.0f¢   %.0f¢   %-6d %s%s$%.2f%s %s\n",
+				status,
+				p.Asset,
+				sideColor, p.Side, cReset,
+				p.EntryPrice.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+				p.Current.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+				p.Size,
+				pnlColor, pnlSign, p.PnL.InexactFloat64(), cReset,
+				d.formatDuration(p.HoldTime),
+			))
+		} else {
+			buf.WriteString(fmt.Sprintf("%-5s %s%-4s%s %s%s%.2f%s\n",
+				p.Asset,
+				sideColor, p.Side, cReset,
+				pnlColor, pnlSign, p.PnL.InexactFloat64(), cReset,
+			))
+		}
+		row++
+	}
+}
+
+func (d *ResponsiveDash) renderSignalsContent(buf *strings.Builder, width, height int) {
+	if len(d.signals) == 0 {
+		buf.WriteString(cDim + "Waiting for signals..." + cReset)
+		return
+	}
+
+	// Show most recent signals first
+	start := len(d.signals) - height
+	if start < 0 {
+		start = 0
+	}
+
+	for i := len(d.signals) - 1; i >= start; i-- {
+		s := d.signals[i]
+
+		// Type color and icon
+		typeStr := ""
+		switch s.Type {
+		case "BUY":
+			typeStr = cSuccess + "▶ BUY " + cReset
+		case "SELL":
+			typeStr = cDanger + "◀ SELL" + cReset
+		case "STOP":
+			typeStr = cWarning + "⬤ STOP" + cReset
+		default:
+			typeStr = cInfo + "◉ SIG " + cReset
+		}
+
+		// Side color
+		sideColor := cSuccess
+		if s.Side == "DOWN" {
+			sideColor = cDanger
+		}
+
+		timeStr := s.Time.Format("15:04:05")
+
+		if width >= 50 {
+			buf.WriteString(fmt.Sprintf("%s %s %-6s %s%-4s%s %.0f¢\n",
+				cDim+timeStr+cReset,
+				typeStr,
+				s.Asset,
+				sideColor, s.Side, cReset,
+				s.Price.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+			))
+		} else {
+			buf.WriteString(fmt.Sprintf("%s %-5s %s%-3s%s\n",
+				typeStr, s.Asset,
+				sideColor, s.Side[:2], cReset,
+			))
+		}
+	}
+}
+
+func (d *ResponsiveDash) renderLogContent(buf *strings.Builder, width, height int) {
+	if len(d.logs) == 0 {
+		buf.WriteString(cDim + "No activity yet..." + cReset)
+		return
+	}
+
+	// Show most recent logs
+	start := len(d.logs) - height
+	if start < 0 {
+		start = 0
+	}
+
+	for i := start; i < len(d.logs); i++ {
+		line := d.logs[i]
+		if len(line) > width {
+			line = line[:width-3] + "..."
+		}
+		buf.WriteString(line + "\n")
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC API
+// ═══════════════════════════════════════════════════════════════════════════
+
+// UpdateMarket updates market data for an asset
+func (d *ResponsiveDash) UpdateMarket(asset string, livePrice, priceToBeat, upOdds, downOdds decimal.Decimal) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.markets[asset] = &RMarketData{
+		Asset:       asset,
+		LivePrice:   livePrice,
+		PriceToBeat: priceToBeat,
+		UpOdds:      upOdds,
+		DownOdds:    downOdds,
+		Spread:      upOdds.Add(downOdds).Sub(decimal.NewFromInt(1)).Abs(),
+		UpdatedAt:   time.Now(),
+	}
+
+	d.triggerUpdate()
+}
+
+// UpdatePosition updates or adds a position
+func (d *ResponsiveDash) UpdatePosition(asset, side string, entry, current decimal.Decimal, size int64, status string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	pos, exists := d.positions[asset]
+	if !exists {
+		pos = &RPositionData{
+			Asset:      asset,
+			Side:       side,
+			EntryPrice: entry,
+			Size:       size,
+		}
+		d.positions[asset] = pos
+	}
+
+	pos.Current = current
+	pos.Status = status
+	pos.PnL = current.Sub(entry).Mul(decimal.NewFromInt(size))
+	if !entry.IsZero() {
+		pos.PnLPct = current.Sub(entry).Div(entry).InexactFloat64() * 100
+	}
+
+	d.triggerUpdate()
+}
+
+// RemovePosition removes a position
+func (d *ResponsiveDash) RemovePosition(asset string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	delete(d.positions, asset)
+	d.triggerUpdate()
+}
+
+// AddSignal adds a new signal
+func (d *ResponsiveDash) AddSignal(asset, side, signalType string, price decimal.Decimal, reason string, confidence float64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.signals = append(d.signals, RSignalData{
+		Time:       time.Now(),
+		Asset:      asset,
+		Side:       side,
+		Type:       signalType,
+		Price:      price,
+		Reason:     reason,
+		Confidence: confidence,
+	})
+
+	// Keep last 50 signals
+	if len(d.signals) > 50 {
+		d.signals = d.signals[len(d.signals)-50:]
+	}
+
+	d.triggerUpdate()
+}
+
+// AddLog adds a log message
+func (d *ResponsiveDash) AddLog(msg string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	timestamp := time.Now().Format("15:04:05")
+	d.logs = append(d.logs, fmt.Sprintf("%s%s%s %s", cDim, timestamp, cReset, msg))
+
+	// Keep last 100 logs
+	if len(d.logs) > 100 {
+		d.logs = d.logs[len(d.logs)-100:]
+	}
+
+	d.triggerUpdate()
+}
+
+// UpdateStats updates overall statistics
+func (d *ResponsiveDash) UpdateStats(totalTrades, winningTrades int, totalPnL, balance decimal.Decimal) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.totalTrades = totalTrades
+	d.winningTrades = winningTrades
+	d.totalPnL = totalPnL
+	d.balance = balance
+
+	d.triggerUpdate()
+}
+
+// SetMode sets the trading mode (LIVE/PAPER/BACKTEST)
+func (d *ResponsiveDash) SetMode(mode string) {
+	d.mu.Lock()
+	d.strategyMode = mode
+	d.mu.Unlock()
+	d.triggerUpdate()
+}
+
+// SetDayPnL sets today's P&L
+func (d *ResponsiveDash) SetDayPnL(pnl decimal.Decimal) {
+	d.mu.Lock()
+	d.dayPnL = pnl
+	d.mu.Unlock()
+	d.triggerUpdate()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+func (d *ResponsiveDash) triggerUpdate() {
+	select {
+	case d.updateCh <- struct{}{}:
+	default:
+	}
+}
+
+func (d *ResponsiveDash) formatDuration(dur time.Duration) string {
+	if dur < time.Minute {
+		return fmt.Sprintf("%ds", int(dur.Seconds()))
+	}
+	if dur < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(dur.Minutes()), int(dur.Seconds())%60)
+	}
+	return fmt.Sprintf("%dh%dm", int(dur.Hours()), int(dur.Minutes())%60)
+}
+
+func (d *ResponsiveDash) layoutName() string {
+	switch d.layout {
+	case LayoutCompact:
+		return "COMPACT"
+	case LayoutMedium:
+		return "MEDIUM"
+	case LayoutWide:
+		return "WIDE"
+	case LayoutUltra:
+		return "ULTRA"
+	}
+	return "?"
+}
+
+// visibleLen returns the visible length of a string (excluding ANSI codes)
+func (d *ResponsiveDash) visibleLen(s string) int {
+	// Remove ANSI escape sequences
+	inEscape := false
+	count := 0
+	for _, r := range s {
+		if r == '\033' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+// truncate truncates a string to maxLen visible characters
+func (d *ResponsiveDash) truncate(s string, maxLen int) string {
+	if d.visibleLen(s) <= maxLen {
+		return s
+	}
+
+	// Simple truncation - could be improved to handle ANSI codes
+	runes := []rune(s)
+	if len(runes) > maxLen-3 {
+		return string(runes[:maxLen-3]) + "..."
+	}
+	return s
+}
+
+// Writer returns an io.Writer for logging
+func (d *ResponsiveDash) Writer() *ResponsiveDashWriter {
+	return &ResponsiveDashWriter{dash: d}
+}
+
+// ResponsiveDashWriter implements io.Writer
+type ResponsiveDashWriter struct {
+	dash *ResponsiveDash
+}
+
+func (w *ResponsiveDashWriter) Write(p []byte) (n int, err error) {
+	msg := strings.TrimSpace(string(p))
+	if msg != "" {
+		w.dash.AddLog(msg)
+	}
+	return len(p), nil
+}

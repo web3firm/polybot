@@ -38,6 +38,7 @@ type SwingStrategy struct {
 	db            *database.Database
 	notifier      TradeNotifier
 	proDash       *dashboard.ProDashboard
+	respDash      *dashboard.ResponsiveDash
 
 	// State
 	positions   map[string]*SwingPosition // Asset -> position
@@ -111,10 +112,16 @@ func (s *SwingStrategy) SetNotifier(n TradeNotifier) {
 	log.Info().Msg("📱 [SWING] Notifier connected")
 }
 
-// SetDashboard sets the dashboard updater
+// SetDashboard sets the dashboard updater (ProDashboard)
 func (s *SwingStrategy) SetDashboard(d *dashboard.ProDashboard) {
 	s.proDash = d
 	log.Info().Msg("📊 [SWING] Dashboard connected")
+}
+
+// SetResponsiveDashboard sets the responsive dashboard
+func (s *SwingStrategy) SetResponsiveDashboard(d *dashboard.ResponsiveDash) {
+	s.respDash = d
+	log.Info().Msg("📊 [SWING] Responsive dashboard connected")
 }
 
 // Start begins the swing trading loop
@@ -519,13 +526,13 @@ func (s *SwingStrategy) calculateSize(odds decimal.Decimal) int64 {
 }
 
 func (s *SwingStrategy) updateDashboard() {
-	if s.proDash == nil {
-		return
-	}
-
 	// Update stats - pass zero for balance since we don't track it here
 	s.mu.RLock()
-	s.proDash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, decimal.Zero)
+	if s.respDash != nil {
+		s.respDash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, decimal.Zero)
+	} else if s.proDash != nil {
+		s.proDash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, decimal.Zero)
+	}
 	s.mu.RUnlock()
 }
 
