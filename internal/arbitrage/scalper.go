@@ -178,7 +178,7 @@ func (s *ScalperStrategy) Start() {
 }
 
 func (s *ScalperStrategy) monitorLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond) // Fast scanning
+	ticker := time.NewTicker(100 * time.Millisecond) // ULTRA-FAST 100ms scanning!
 	defer ticker.Stop()
 
 	for {

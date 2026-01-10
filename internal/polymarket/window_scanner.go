@@ -100,8 +100,8 @@ func (s *WindowScanner) scanLoop() {
 	// Scan immediately
 	s.scan()
 
-	// Scan every 2 seconds for FAST odds detection - latency is everything!
-	ticker := time.NewTicker(2 * time.Second)
+	// Scan every 200ms for ULTRA-FAST odds detection - latency is everything!
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
