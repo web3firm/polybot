@@ -696,11 +696,46 @@ func (d *ResponsiveDash) renderLogContent(buf *strings.Builder, width, height in
 
 	for i := start; i < len(d.logs); i++ {
 		line := d.logs[i]
-		if len(line) > width {
-			line = line[:width-3] + "..."
-		}
-		buf.WriteString(line + "\n")
+		// Truncate safely (considering ANSI codes)
+		line = d.truncateAnsi(line, width-2)
+		buf.WriteString(line + cReset + "\n")
 	}
+}
+
+// truncateAnsi truncates a string to maxLen visible characters, preserving ANSI codes
+func (d *ResponsiveDash) truncateAnsi(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	
+	var result strings.Builder
+	visible := 0
+	inEscape := false
+	
+	for _, r := range s {
+		if r == '\033' {
+			inEscape = true
+			result.WriteRune(r)
+			continue
+		}
+		if inEscape {
+			result.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		
+		// Visible character
+		if visible >= maxLen-3 {
+			result.WriteString("...")
+			break
+		}
+		result.WriteRune(r)
+		visible++
+	}
+	
+	return result.String()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -788,8 +823,14 @@ func (d *ResponsiveDash) AddLog(msg string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	timestamp := time.Now().Format("15:04:05")
-	d.logs = append(d.logs, fmt.Sprintf("%s%s%s %s", cDim, timestamp, cReset, msg))
+	// Clean up the message - remove existing timestamps if present
+	if len(msg) > 9 && msg[2] == ':' && msg[5] == ':' {
+		// Message already has timestamp like "12:34:56 ..."
+		d.logs = append(d.logs, msg)
+	} else {
+		timestamp := time.Now().Format("15:04:05")
+		d.logs = append(d.logs, fmt.Sprintf("%s%s%s %s", cDim, timestamp, cReset, msg))
+	}
 
 	// Keep last 100 logs
 	if len(d.logs) > 100 {
@@ -943,42 +984,24 @@ func (w *ResponsiveDashWriter) formatZerologJSON(raw string) string {
 		return ""
 	}
 	
-	// Build formatted output
+	// Skip noisy logs
+	if strings.Contains(message, "Windows updated") || 
+	   strings.Contains(message, "scan complete") ||
+	   strings.Contains(message, "Position check") {
+		return ""
+	}
+	
+	// Build formatted output - keep it SHORT
 	var sb strings.Builder
 	
-	// Level prefix with color
-	switch level {
-	case "info":
-		sb.WriteString("ℹ️ ")
-	case "warn":
-		sb.WriteString("⚠️ ")
-	case "error":
-		sb.WriteString("❌ ")
-	default:
-		sb.WriteString("• ")
-	}
-	
-	// Message
+	// Message only (emoji already in message usually)
 	if message != "" {
 		sb.WriteString(message)
-	} else {
-		// No message, build from fields
-		for key, val := range data {
-			if key == "level" || key == "time" {
-				continue
-			}
-			if sb.Len() > 3 {
-				sb.WriteString(" | ")
-			}
-			sb.WriteString(fmt.Sprintf("%s=%v", key, val))
-		}
 	}
 	
-	// Add key fields as context
-	for _, key := range []string{"asset", "side", "price", "profit"} {
-		if val, ok := data[key]; ok {
-			sb.WriteString(fmt.Sprintf(" [%s=%v]", key, val))
-		}
+	// Add asset if present and not in message
+	if asset, ok := data["asset"].(string); ok && !strings.Contains(message, asset) {
+		sb.WriteString(" [" + asset + "]")
 	}
 	
 	return sb.String()

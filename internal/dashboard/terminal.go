@@ -568,42 +568,24 @@ func (w *ProDashboardWriter) formatZerologJSON(raw string) string {
 		return ""
 	}
 	
-	// Build formatted output
+	// Skip noisy logs
+	if strings.Contains(message, "Windows updated") || 
+	   strings.Contains(message, "scan complete") ||
+	   strings.Contains(message, "Position check") {
+		return ""
+	}
+	
+	// Build formatted output - keep it SHORT
 	var sb strings.Builder
 	
-	// Level prefix
-	switch level {
-	case "info":
-		sb.WriteString("ℹ️ ")
-	case "warn":
-		sb.WriteString("⚠️ ")
-	case "error":
-		sb.WriteString("❌ ")
-	default:
-		sb.WriteString("• ")
-	}
-	
-	// Message
+	// Message only (emoji already in message usually)
 	if message != "" {
 		sb.WriteString(message)
-	} else {
-		// No message, build from fields
-		for key, val := range data {
-			if key == "level" || key == "time" {
-				continue
-			}
-			if sb.Len() > 3 {
-				sb.WriteString(" | ")
-			}
-			sb.WriteString(fmt.Sprintf("%s=%v", key, val))
-		}
 	}
 	
-	// Add key fields as context
-	for _, key := range []string{"asset", "side", "price", "profit"} {
-		if val, ok := data[key]; ok {
-			sb.WriteString(fmt.Sprintf(" [%s=%v]", key, val))
-		}
+	// Add asset if present and not in message
+	if asset, ok := data["asset"].(string); ok && !strings.Contains(message, asset) {
+		sb.WriteString(" [" + asset + "]")
 	}
 	
 	return sb.String()
