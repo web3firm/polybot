@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -909,8 +910,76 @@ type ResponsiveDashWriter struct {
 
 func (w *ResponsiveDashWriter) Write(p []byte) (n int, err error) {
 	msg := strings.TrimSpace(string(p))
-	if msg != "" {
-		w.dash.AddLog(msg)
+	if msg == "" {
+		return len(p), nil
+	}
+	
+	// Parse zerolog JSON and format nicely
+	formatted := w.formatZerologJSON(msg)
+	if formatted != "" {
+		w.dash.AddLog(formatted)
 	}
 	return len(p), nil
+}
+
+// formatZerologJSON parses zerolog JSON and formats it for display
+func (w *ResponsiveDashWriter) formatZerologJSON(raw string) string {
+	// Try to parse as JSON
+	if !strings.HasPrefix(raw, "{") {
+		return raw // Already formatted text
+	}
+	
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		return raw // Not valid JSON, return as-is
+	}
+	
+	// Get level and message
+	level, _ := data["level"].(string)
+	message, _ := data["message"].(string)
+	
+	// Skip debug level logs in dashboard
+	if level == "debug" {
+		return ""
+	}
+	
+	// Build formatted output
+	var sb strings.Builder
+	
+	// Level prefix with color
+	switch level {
+	case "info":
+		sb.WriteString("ℹ️ ")
+	case "warn":
+		sb.WriteString("⚠️ ")
+	case "error":
+		sb.WriteString("❌ ")
+	default:
+		sb.WriteString("• ")
+	}
+	
+	// Message
+	if message != "" {
+		sb.WriteString(message)
+	} else {
+		// No message, build from fields
+		for key, val := range data {
+			if key == "level" || key == "time" {
+				continue
+			}
+			if sb.Len() > 3 {
+				sb.WriteString(" | ")
+			}
+			sb.WriteString(fmt.Sprintf("%s=%v", key, val))
+		}
+	}
+	
+	// Add key fields as context
+	for _, key := range []string{"asset", "side", "price", "profit"} {
+		if val, ok := data[key]; ok {
+			sb.WriteString(fmt.Sprintf(" [%s=%v]", key, val))
+		}
+	}
+	
+	return sb.String()
 }

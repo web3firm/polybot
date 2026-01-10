@@ -75,6 +75,8 @@ type ScalperStrategy struct {
 	totalTrades   int
 	winningTrades int
 	totalProfit   decimal.Decimal
+	cachedBalance decimal.Decimal // Cached account balance
+	lastBalanceFetch time.Time    // When we last fetched balance
 	
 	stopCh chan struct{}
 }
@@ -1365,18 +1367,32 @@ func (s *ScalperStrategy) dashAddTrade(asset, action string, price decimal.Decim
 // dashUpdateStats updates overall stats on dashboard
 func (s *ScalperStrategy) dashUpdateStats() {
 	s.mu.RLock()
-	balance := decimal.Zero
 	totalTrades := s.totalTrades
 	winningTrades := s.winningTrades
 	totalProfit := s.totalProfit
+	cachedBalance := s.cachedBalance
+	lastFetch := s.lastBalanceFetch
 	s.mu.RUnlock()
 	
+	// Fetch balance every 30 seconds
+	if time.Since(lastFetch) > 30*time.Second && s.clobClient != nil {
+		go func() {
+			balance, err := s.clobClient.GetBalance()
+			if err == nil {
+				s.mu.Lock()
+				s.cachedBalance = balance
+				s.lastBalanceFetch = time.Now()
+				s.mu.Unlock()
+			}
+		}()
+	}
+	
 	if s.respDash != nil {
-		s.respDash.UpdateStats(totalTrades, winningTrades, totalProfit, balance)
+		s.respDash.UpdateStats(totalTrades, winningTrades, totalProfit, cachedBalance)
 	} else if s.proDash != nil {
-		s.proDash.UpdateStats(totalTrades, winningTrades, totalProfit, balance)
+		s.proDash.UpdateStats(totalTrades, winningTrades, totalProfit, cachedBalance)
 	} else if s.dash != nil {
-		s.dash.UpdateStats(totalTrades, winningTrades, totalProfit, balance)
+		s.dash.UpdateStats(totalTrades, winningTrades, totalProfit, cachedBalance)
 	}
 }
 

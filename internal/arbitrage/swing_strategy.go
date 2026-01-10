@@ -51,6 +51,10 @@ type SwingStrategy struct {
 	winningTrades int
 	totalProfit   decimal.Decimal
 
+	// Balance tracking
+	cachedBalance    decimal.Decimal
+	lastBalanceFetch time.Time
+
 	// Config
 	config SwingConfig
 }
@@ -178,6 +182,9 @@ func (s *SwingStrategy) scan() {
 		// Record price for history tracking
 		s.scanner.RecordPrice(w.Asset, w.YesPrice, w.NoPrice)
 
+		// Update dashboard with market data
+		s.updateMarketData(w.Asset, w.PriceToBeat, w.YesPrice, w.NoPrice)
+
 		// Skip if we have position or cooldown
 		if s.hasPosition(w.Asset) || s.onCooldown(w.Asset) {
 			continue
@@ -197,7 +204,7 @@ func (s *SwingStrategy) scan() {
 		}
 	}
 
-	// Update dashboard
+	// Update dashboard stats
 	s.updateDashboard()
 }
 
@@ -526,14 +533,41 @@ func (s *SwingStrategy) calculateSize(odds decimal.Decimal) int64 {
 }
 
 func (s *SwingStrategy) updateDashboard() {
-	// Update stats - pass zero for balance since we don't track it here
+	// Fetch balance every 30 seconds
+	s.mu.RLock()
+	lastFetch := s.lastBalanceFetch
+	cachedBalance := s.cachedBalance
+	s.mu.RUnlock()
+
+	if time.Since(lastFetch) > 30*time.Second && s.clobClient != nil {
+		go func() {
+			balance, err := s.clobClient.GetBalance()
+			if err == nil {
+				s.mu.Lock()
+				s.cachedBalance = balance
+				s.lastBalanceFetch = time.Now()
+				s.mu.Unlock()
+			}
+		}()
+	}
+
+	// Update stats
 	s.mu.RLock()
 	if s.respDash != nil {
-		s.respDash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, decimal.Zero)
+		s.respDash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, cachedBalance)
 	} else if s.proDash != nil {
-		s.proDash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, decimal.Zero)
+		s.proDash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, cachedBalance)
 	}
 	s.mu.RUnlock()
+}
+
+// updateMarketData sends market prices to dashboard
+func (s *SwingStrategy) updateMarketData(asset string, priceToBeat, upOdds, downOdds decimal.Decimal) {
+	if s.respDash != nil {
+		s.respDash.UpdateMarket(asset, decimal.Zero, priceToBeat, upOdds, downOdds)
+	} else if s.proDash != nil {
+		s.proDash.UpdateMarket(asset, decimal.Zero, priceToBeat, upOdds, downOdds)
+	}
 }
 
 func (s *SwingStrategy) saveEntryToDB(pos *SwingPosition) {
