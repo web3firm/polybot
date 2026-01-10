@@ -257,6 +257,7 @@ func main() {
 				clobClient,
 				db,
 			)
+			swing.SetEngine(arbEngines[i]) // For live price data
 			swing.SetNotifier(nil) // Will set after telegram init
 			if proDash != nil {
 				swing.SetDashboard(proDash)

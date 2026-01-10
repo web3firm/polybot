@@ -35,6 +35,7 @@ type SwingStrategy struct {
 	scanner       *MeanReversionScanner
 	windowScanner *polymarket.WindowScanner
 	clobClient    *CLOBClient
+	engine        *Engine // For live price data
 	db            *database.Database
 	notifier      TradeNotifier
 	proDash       *dashboard.ProDashboard
@@ -114,6 +115,12 @@ func NewSwingStrategy(
 func (s *SwingStrategy) SetNotifier(n TradeNotifier) {
 	s.notifier = n
 	log.Info().Msg("📱 [SWING] Notifier connected")
+}
+
+// SetEngine sets the arbitrage engine for price data
+func (s *SwingStrategy) SetEngine(e *Engine) {
+	s.engine = e
+	log.Info().Msg("⚡ [SWING] Engine connected for price data")
 }
 
 // SetDashboard sets the dashboard updater (ProDashboard)
@@ -563,10 +570,16 @@ func (s *SwingStrategy) updateDashboard() {
 
 // updateMarketData sends market prices to dashboard
 func (s *SwingStrategy) updateMarketData(asset string, priceToBeat, upOdds, downOdds decimal.Decimal) {
+	// Get live price from engine if available
+	livePrice := decimal.Zero
+	if s.engine != nil {
+		livePrice = s.engine.GetCurrentPrice()
+	}
+	
 	if s.respDash != nil {
-		s.respDash.UpdateMarket(asset, decimal.Zero, priceToBeat, upOdds, downOdds)
+		s.respDash.UpdateMarket(asset, livePrice, priceToBeat, upOdds, downOdds)
 	} else if s.proDash != nil {
-		s.proDash.UpdateMarket(asset, decimal.Zero, priceToBeat, upOdds, downOdds)
+		s.proDash.UpdateMarket(asset, livePrice, priceToBeat, upOdds, downOdds)
 	}
 }
 
