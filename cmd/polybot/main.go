@@ -30,6 +30,7 @@ import (
 	"github.com/web3guy0/polybot/internal/chainlink"
 	"github.com/web3guy0/polybot/internal/cmc"
 	"github.com/web3guy0/polybot/internal/config"
+	"github.com/web3guy0/polybot/internal/dashboard"
 	"github.com/web3guy0/polybot/internal/database"
 	"github.com/web3guy0/polybot/internal/polymarket"
 )
@@ -37,9 +38,30 @@ import (
 const version = "4.0.0"
 
 func main() {
-	// Setup logging
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	// Check for dashboard mode FIRST (before setting up zerolog)
+	useDashboard := false
+	for _, arg := range os.Args[1:] {
+		if arg == "--dashboard" || arg == "-d" {
+			useDashboard = true
+		}
+	}
+
+	// Create dashboard early (even if not used, for nil safety)
+	var dash *dashboard.Dashboard
+	if useDashboard {
+		dash = dashboard.New()
+	}
+
+	// Setup logging - route to dashboard if enabled
+	if useDashboard && dash != nil {
+		// Silent mode - logs go to dashboard
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		log.Logger = log.Output(dash.Writer())
+	} else {
+		// Normal console logging
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
 
 	// Check for analysis mode
 	if len(os.Args) > 1 && os.Args[1] == "--analyze" {
@@ -252,9 +274,19 @@ func main() {
 		telegramBot.AddEngine(asset, arbEngines[i])
 		telegramBot.AddScalper(asset, scalperStrategies[i])
 		scalperStrategies[i].SetNotifier(telegramBot) // Connect Telegram for alerts
+		
+		// Connect dashboard to scalper
+		if dash != nil {
+			scalperStrategies[i].SetDashboard(dash)
+		}
 	}
 
 	go telegramBot.Start()
+	
+	// Start dashboard if enabled
+	if dash != nil {
+		dash.Start()
+	}
 
 	// ====== STARTUP COMPLETE ======
 	log.Info().Msg("✅ All systems online")
@@ -289,6 +321,11 @@ func main() {
 	// Graceful shutdown
 	log.Info().Msg("Shutting down...")
 
+	// Stop dashboard first
+	if dash != nil {
+		dash.Stop()
+	}
+	
 	telegramBot.Stop()
 	for _, engine := range arbEngines {
 		engine.Stop()

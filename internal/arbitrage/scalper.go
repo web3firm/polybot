@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
+	"github.com/web3guy0/polybot/internal/dashboard"
 	"github.com/web3guy0/polybot/internal/database"
 	"github.com/web3guy0/polybot/internal/polymarket"
 )
@@ -38,6 +39,7 @@ type ScalperStrategy struct {
 	engine        *Engine // Reference to engine for price-to-beat data
 	db            *database.Database // Database for trade logging
 	notifier      TradeNotifier // For Telegram alerts
+	dash          *dashboard.Dashboard // For live terminal dashboard
 	
 	// ML-powered dynamic thresholds
 	dynamicThreshold *DynamicThreshold
@@ -148,6 +150,12 @@ func (s *ScalperStrategy) SetNotifier(n TradeNotifier) {
 	log.Info().Msg("📱 [SCALP] Notifier connected for trade alerts")
 }
 
+// SetDashboard sets the live terminal dashboard
+func (s *ScalperStrategy) SetDashboard(d *dashboard.Dashboard) {
+	s.dash = d
+	log.Info().Msg("📺 [SCALP] Dashboard connected for live UI")
+}
+
 // EnableML enables/disables ML-powered dynamic thresholds
 func (s *ScalperStrategy) EnableML(enabled bool) {
 	s.mu.Lock()
@@ -200,6 +208,17 @@ func (s *ScalperStrategy) checkWindows() {
 		numPositions := len(s.positions)
 		s.mu.Unlock()
 
+		// Update dashboard with prices
+		binPrice := decimal.Zero
+		clPrice := decimal.Zero
+		if s.engine != nil {
+			binPrice = s.engine.GetCurrentPrice()
+			if state := s.engine.GetWindowState(w.ID); state != nil && !state.StartPrice.IsZero() {
+				clPrice = state.StartPrice // Use start price as reference
+			}
+		}
+		s.dashUpdatePrices(asset, binPrice, clPrice, w.YesPrice, w.NoPrice)
+
 		// Log position state periodically (every ~5 seconds)
 		if time.Now().Second()%5 == 0 {
 			log.Debug().
@@ -219,6 +238,15 @@ func (s *ScalperStrategy) checkWindows() {
 		}
 
 		if hasPos {
+			// Update dashboard with position
+			var currentPrice decimal.Decimal
+			if pos.Side == "UP" {
+				currentPrice = w.YesPrice
+			} else {
+				currentPrice = w.NoPrice
+			}
+			s.dashUpdatePosition(pos, currentPrice, "OPEN")
+			
 			// Manage existing position
 			s.managePosition(pos, w)
 		} else {
@@ -226,6 +254,9 @@ func (s *ScalperStrategy) checkWindows() {
 			s.findScalpOpportunity(w)
 		}
 	}
+	
+	// Update stats on dashboard
+	s.dashUpdateStats()
 }
 
 func (s *ScalperStrategy) findScalpOpportunity(w *polymarket.PredictionWindow) {
@@ -645,6 +676,10 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 			// Save entry to database
 			s.saveEntryToDB(pos, "")
 			
+			// Dashboard updates
+			s.dashUpdatePosition(pos, orderPrice, "OPEN")
+			s.dashAddTrade(pos.Asset, "BUY", orderPrice, pos.Size, decimal.Zero, "✅")
+			
 			log.Info().Str("asset", pos.Asset).Msg("📝 [SCALP] Paper BUY recorded")
 		} else {
 			// Calculate P&L
@@ -664,6 +699,15 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 			
 			// Update database with exit
 			s.saveExitToDB(pos, "", orderPrice, pnl, exitType)
+			
+			// Dashboard updates
+			s.dashRemovePosition(pos.Asset)
+			resultIcon := "✅"
+			if !won {
+				resultIcon = "❌"
+			}
+			s.dashAddTrade(pos.Asset, "SELL", orderPrice, pos.Size, pnl, resultIcon)
+			s.dashUpdateStats()
 			
 			delete(s.positions, pos.Asset)
 			log.Info().
@@ -760,6 +804,10 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 		// Save entry to database
 		s.saveEntryToDB(pos, orderID)
 		
+		// Dashboard updates
+		s.dashUpdatePosition(pos, orderPrice, "OPEN")
+		s.dashAddTrade(pos.Asset, "BUY", orderPrice, pos.Size, decimal.Zero, "✅")
+		
 		// Send Telegram alert
 		if s.notifier != nil {
 			s.notifier.SendTradeAlert(pos.Asset, pos.Side, orderPrice, pos.Size, "BUY")
@@ -825,12 +873,19 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 		// Update database with exit
 		s.saveExitToDB(pos, orderID, orderPrice, pnl, exitType)
 		
+		// Dashboard updates
+		s.dashRemovePosition(pos.Asset)
+		resultIcon := "✅"
+		action := "SELL"
+		if exitType == "stop_loss" {
+			resultIcon = "❌"
+			action = "STOP"
+		}
+		s.dashAddTrade(pos.Asset, action, orderPrice, pos.Size, pnl, resultIcon)
+		s.dashUpdateStats()
+		
 		// Send Telegram alert with P&L
 		if s.notifier != nil {
-			action := "SELL"
-			if exitType == "stop_loss" {
-				action = "STOP"
-			}
 			s.notifier.SendTradeAlert(pos.Asset, pos.Side, orderPrice, pos.Size, action)
 		}
 		
@@ -1013,4 +1068,59 @@ func truncateQuestion(q string) string {
 		return q[:40] + "..."
 	}
 	return q
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DASHBOARD HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+
+// dashUpdatePosition updates the dashboard with current position state
+func (s *ScalperStrategy) dashUpdatePosition(pos *ScalpPosition, currentPrice decimal.Decimal, status string) {
+	if s.dash == nil {
+		return
+	}
+	s.dash.UpdatePosition(pos.Asset, pos.Side, pos.EntryPrice, currentPrice, pos.Size, status)
+}
+
+// dashRemovePosition removes a position from dashboard
+func (s *ScalperStrategy) dashRemovePosition(asset string) {
+	if s.dash == nil {
+		return
+	}
+	s.dash.RemovePosition(asset)
+}
+
+// dashAddTrade logs a trade to dashboard
+func (s *ScalperStrategy) dashAddTrade(asset, action string, price decimal.Decimal, size int64, pnl decimal.Decimal, result string) {
+	if s.dash == nil {
+		return
+	}
+	s.dash.AddTrade(asset, action, price, size, pnl, result)
+}
+
+// dashUpdateStats updates overall stats on dashboard
+func (s *ScalperStrategy) dashUpdateStats() {
+	if s.dash == nil {
+		return
+	}
+	s.mu.RLock()
+	balance := decimal.Zero // TODO: Get from CLOB client
+	s.dash.UpdateStats(s.totalTrades, s.winningTrades, s.totalProfit, balance)
+	s.mu.RUnlock()
+}
+
+// dashUpdatePrices updates price display on dashboard
+func (s *ScalperStrategy) dashUpdatePrices(asset string, binPrice, clPrice, upOdds, downOdds decimal.Decimal) {
+	if s.dash == nil {
+		return
+	}
+	s.dash.UpdatePrice(asset, binPrice, clPrice, upOdds, downOdds)
+}
+
+// dashLog logs a message to dashboard
+func (s *ScalperStrategy) dashLog(msg string) {
+	if s.dash == nil {
+		return
+	}
+	s.dash.AddLog(msg)
 }
