@@ -561,17 +561,19 @@ func (c *CLOBClient) PlaceLimitOrder(tokenID string, price, size decimal.Decimal
 	
 	// Add slippage for faster fills:
 	// BUY: Pay slightly MORE to be at front of queue
-	// SELL: Accept slightly LESS to fill faster
-	slippage := decimal.NewFromFloat(0.02) // 2 cents slippage
+	// SELL: Accept MORE slippage to guarantee fill in fast markets
 	
 	if sideInt == SideBuy {
 		// Round DOWN base price, then ADD slippage
 		price = price.Div(tickSize).Floor().Mul(tickSize)
-		price = price.Add(slippage) // Pay 2¢ more to fill faster
+		slippage := decimal.NewFromFloat(0.02) // 2¢ slippage for BUY
+		price = price.Add(slippage)
 	} else {
-		// Round UP base price, then SUBTRACT slippage  
-		price = price.Div(tickSize).Ceil().Mul(tickSize)
-		price = price.Sub(slippage) // Accept 2¢ less to fill faster
+		// SELL needs MORE aggressive slippage to ensure exit
+		// Round DOWN (not up) and subtract more
+		price = price.Div(tickSize).Floor().Mul(tickSize)
+		slippage := decimal.NewFromFloat(0.03) // 3¢ slippage for SELL
+		price = price.Sub(slippage)
 		if price.LessThan(tickSize) {
 			price = tickSize // Minimum 1¢
 		}
