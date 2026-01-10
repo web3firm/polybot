@@ -375,27 +375,28 @@ func (dt *DynamicThreshold) CalculateDynamicProfit(asset string, entryPrice deci
 	return target
 }
 
-// CalculateDynamicStop calculates stop loss based on conditions
+// CalculateDynamicStop calculates stop loss based on entry price
+// Stop loss should be BELOW entry price (e.g., entry 8¢ → stop at 5¢)
 func (dt *DynamicThreshold) CalculateDynamicStop(asset string, entryPrice decimal.Decimal, volatility decimal.Decimal) decimal.Decimal {
 	dt.mu.RLock()
 	defer dt.mu.RUnlock()
 
-	stop := dt.baseStop
-
+	// Stop loss = percentage below entry price
+	// Default: 40% below entry (entry 10¢ → stop at 6¢)
+	stopPct := decimal.NewFromFloat(0.60) // Keep 60% of entry = 40% loss allowed
+	
 	// High volatility = wider stops to avoid getting stopped out
 	volFloat := volatility.InexactFloat64()
 	if volFloat > 0.3 {
-		stop = stop.Mul(decimal.NewFromFloat(0.85)) // Lower stop = wider range
+		stopPct = decimal.NewFromFloat(0.50) // Allow 50% loss in high vol
 	}
-
-	// Never go below 8¢ (near-zero risk) or above 18¢
-	minStop := decimal.NewFromFloat(0.08)
-	maxStop := decimal.NewFromFloat(0.18)
+	
+	stop := entryPrice.Mul(stopPct)
+	
+	// Minimum stop at 2¢ (almost zero, but not quite)
+	minStop := decimal.NewFromFloat(0.02)
 	if stop.LessThan(minStop) {
 		stop = minStop
-	}
-	if stop.GreaterThan(maxStop) {
-		stop = maxStop
 	}
 
 	return stop
