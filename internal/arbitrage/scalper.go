@@ -2,6 +2,7 @@ package arbitrage
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -196,11 +197,21 @@ func (s *ScalperStrategy) checkWindows() {
 		s.mu.Lock()
 		pos, hasPos := s.positions[asset]  // Use ASSET as key, not window ID!
 		cooldownTime, onCooldown := s.orderCooldowns[asset]
+		numPositions := len(s.positions)
 		s.mu.Unlock()
+
+		// Log position state periodically (every ~5 seconds)
+		if time.Now().Second()%5 == 0 {
+			log.Debug().
+				Str("asset", asset).
+				Bool("has_position", hasPos).
+				Int("total_positions", numPositions).
+				Msg("📊 [SCALP] Position check")
+		}
 
 		// Check if we're on cooldown (failed order recently)
 		if onCooldown && time.Now().Before(cooldownTime) {
-			log.Debug().
+			log.Info().
 				Str("asset", asset).
 				Str("cooldown_until", cooldownTime.Format("15:04:05")).
 				Msg("⏳ [SCALP] On cooldown - skipping")
@@ -676,10 +687,28 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 	sizeDecimal := decimal.NewFromInt(pos.Size)
 	orderID, err := s.clobClient.PlaceLimitOrder(tokenID, orderPrice, sizeDecimal, side)
 	if err != nil {
-		log.Error().Err(err).Str("asset", pos.Asset).Msg("❌ [SCALP] Failed to place order")
+		errStr := err.Error()
+		
+		// Check if it's a balance issue
+		isBalanceError := strings.Contains(errStr, "balance") || strings.Contains(errStr, "allowance")
+		
+		if isBalanceError {
+			log.Error().
+				Str("asset", pos.Asset).
+				Str("price", orderPrice.String()).
+				Int64("size", pos.Size).
+				Msg("💸 [SCALP] NOT ENOUGH BALANCE - Need to deposit more USDC!")
+		} else {
+			log.Error().Err(err).Str("asset", pos.Asset).Msg("❌ [SCALP] Failed to place order")
+		}
+		
 		if side == "BUY" {
 			// Failed to enter - SET COOLDOWN to prevent spam retries!
-			cooldownDuration := 2 * time.Minute // Wait 2 minutes before retrying this asset
+			// Longer cooldown for balance errors since depositing takes time
+			cooldownDuration := 5 * time.Minute
+			if !isBalanceError {
+				cooldownDuration = 2 * time.Minute
+			}
 			s.orderCooldowns[pos.Asset] = time.Now().Add(cooldownDuration)
 			log.Warn().
 				Str("asset", pos.Asset).
