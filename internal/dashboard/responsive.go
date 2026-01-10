@@ -1,3 +1,5 @@
+
+
 package dashboard
 
 import (
@@ -538,54 +540,79 @@ func (d *ResponsiveDash) drawStatusBar(buf *strings.Builder, width, height int) 
 
 func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height int) {
 	if len(d.markets) == 0 {
-		buf.WriteString(cDim + "No market data..." + cReset)
+		buf.WriteString(cDim + "Waiting for market data..." + cReset)
 		return
 	}
 
-	// Header
-	if width >= 50 {
-		buf.WriteString(fmt.Sprintf("%sASSET    LIVE      P2B       UP     DOWN    SPR%s\n",
-			cSecondary+cUnderline, cReset))
+	// Professional table header with separators
+	if width >= 70 {
+		buf.WriteString(fmt.Sprintf("%sAsset   │ Live Price  │ Price2Beat  │   UP   │  DOWN  │ Spread%s\n",
+			cSecondary, cReset))
+		buf.WriteString(cDim + "────────┼─────────────┼─────────────┼────────┼────────┼────────" + cReset + "\n")
+	} else if width >= 45 {
+		buf.WriteString(fmt.Sprintf("%sAsset  │ Live     │ P2B      │  UP  │ DOWN%s\n",
+			cSecondary, cReset))
+		buf.WriteString(cDim + "───────┼──────────┼──────────┼──────┼──────" + cReset + "\n")
 	} else {
-		buf.WriteString(fmt.Sprintf("%sASSET  UP   DOWN%s\n", cSecondary+cUnderline, cReset))
+		buf.WriteString(fmt.Sprintf("%sAsset │  UP  │ DOWN%s\n", cSecondary, cReset))
+		buf.WriteString(cDim + "──────┼──────┼──────" + cReset + "\n")
 	}
 
 	row := 0
 	for _, m := range d.markets {
-		if row >= height-1 {
+		if row >= height-3 {
 			break
 		}
 
 		// Determine trend indicator
 		trend := " "
 		if m.LivePrice.GreaterThan(m.PriceToBeat) {
-			trend = cSuccess + arrowUp + cReset
+			trend = cSuccess + "▲" + cReset
 		} else if m.LivePrice.LessThan(m.PriceToBeat) {
-			trend = cDanger + arrowDown + cReset
+			trend = cDanger + "▼" + cReset
 		}
 
-		// Stale indicator
-		stale := ""
-		if time.Since(m.UpdatedAt) > 5*time.Second {
-			stale = cWarning + " ⚠" + cReset
+		// Format odds with color - highlight cheap ones
+		upOdds := m.UpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64()
+		downOdds := m.DownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64()
+		
+		upColor := cDim
+		downColor := cDim
+		if upOdds <= 20 {
+			upColor = cSuccess + cBold
+		} else if upOdds <= 35 {
+			upColor = cSuccess
+		}
+		if downOdds <= 20 {
+			downColor = cSuccess + cBold
+		} else if downOdds <= 35 {
+			downColor = cDanger
 		}
 
-		if width >= 50 {
-			buf.WriteString(fmt.Sprintf("%-8s %s$%-8.2f $%-8.2f %s%-5.0f%s %s%-5.0f%s %.0f¢%s\n",
+		spread := m.Spread.Mul(decimal.NewFromInt(100)).InexactFloat64()
+
+		if width >= 70 {
+			buf.WriteString(fmt.Sprintf("%-7s │ %s$%-10.2f%s │ $%-10.2f │ %s%4.0f¢%s  │ %s%4.0f¢%s  │ %4.0f¢\n",
 				m.Asset,
-				trend,
-				m.LivePrice.InexactFloat64(),
+				trend, m.LivePrice.InexactFloat64(), cReset,
 				m.PriceToBeat.InexactFloat64(),
-				cSuccess, m.UpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
-				cDanger, m.DownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
-				m.Spread.Mul(decimal.NewFromInt(100)).InexactFloat64(),
-				stale,
+				upColor, upOdds, cReset,
+				downColor, downOdds, cReset,
+				spread,
+			))
+		} else if width >= 45 {
+			buf.WriteString(fmt.Sprintf("%-6s │ %s$%-7.2f%s │ $%-7.2f │ %s%3.0f¢%s │ %s%3.0f¢%s\n",
+				m.Asset,
+				trend, m.LivePrice.InexactFloat64(), cReset,
+				m.PriceToBeat.InexactFloat64(),
+				upColor, upOdds, cReset,
+				downColor, downOdds, cReset,
 			))
 		} else {
-			buf.WriteString(fmt.Sprintf("%-6s %s%.0f%s %s%.0f%s\n",
+			buf.WriteString(fmt.Sprintf("%-5s │ %s%3.0f¢%s │ %s%3.0f¢%s\n",
 				m.Asset,
-				cSuccess, m.UpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
-				cDanger, m.DownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), cReset,
+				upColor, upOdds, cReset,
+				downColor, downOdds, cReset,
 			))
 		}
 		row++
@@ -594,16 +621,22 @@ func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height
 
 func (d *ResponsiveDash) renderPositionsContent(buf *strings.Builder, width, height int) {
 	if len(d.positions) == 0 {
-		buf.WriteString(cDim + "No open positions" + cReset)
+		buf.WriteString(cDim + "No positions - scanning..." + cReset)
 		return
 	}
 
-	// Header
-	if width >= 60 {
-		buf.WriteString(fmt.Sprintf("%sASSET    SIDE   ENTRY   CURR    SIZE   P&L      TIME%s\n",
-			cSecondary+cUnderline, cReset))
+	// Professional table header with separators
+	if width >= 75 {
+		buf.WriteString(fmt.Sprintf("%sAsset  │ Side │ Entry │  Now  │ Size │   P&L   │ Status%s\n",
+			cSecondary, cReset))
+		buf.WriteString(cDim + "───────┼──────┼───────┼───────┼──────┼─────────┼────────" + cReset + "\n")
+	} else if width >= 50 {
+		buf.WriteString(fmt.Sprintf("%sAsset │ Side │ Entry │  P&L  │ Status%s\n",
+			cSecondary, cReset))
+		buf.WriteString(cDim + "──────┼──────┼───────┼───────┼───────" + cReset + "\n")
 	} else {
-		buf.WriteString(fmt.Sprintf("%sASSET SIDE  P&L%s\n", cSecondary+cUnderline, cReset))
+		buf.WriteString(fmt.Sprintf("%sAsset │ Side │  P&L%s\n", cSecondary, cReset))
+		buf.WriteString(cDim + "──────┼──────┼───────" + cReset + "\n")
 	}
 
 	row := 0
@@ -626,30 +659,43 @@ func (d *ResponsiveDash) renderPositionsContent(buf *strings.Builder, width, hei
 			sideColor = cDanger
 		}
 
-		// Status indicator
-		status := dotFilled
+		// Status indicator with text
+		statusText := "OPEN"
+		statusColor := cSuccess
 		switch p.Status {
 		case "OPEN":
-			status = cSuccess + dotFilled + cReset
+			statusText = "● OPEN"
+			statusColor = cSuccess
 		case "CLOSING":
-			status = cWarning + dotFilled + cReset
+			statusText = "◐ EXIT"
+			statusColor = cWarning
 		case "STOP":
-			status = cDanger + dotFilled + cReset
+			statusText = "◉ STOP"
+			statusColor = cDanger
 		}
 
-		if width >= 60 {
-			buf.WriteString(fmt.Sprintf("%s %-8s %s%-6s%s %.0f¢   %.0f¢   %-6d %s%s$%.2f%s %s\n",
-				status,
+		entry := p.EntryPrice.Mul(decimal.NewFromInt(100)).InexactFloat64()
+		curr := p.Current.Mul(decimal.NewFromInt(100)).InexactFloat64()
+
+		if width >= 75 {
+			buf.WriteString(fmt.Sprintf("%-6s │ %s%-4s%s │ %4.0f¢ │ %4.0f¢ │ %4d │ %s%s$%-5.2f%s │ %s%s%s\n",
 				p.Asset,
 				sideColor, p.Side, cReset,
-				p.EntryPrice.Mul(decimal.NewFromInt(100)).InexactFloat64(),
-				p.Current.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+				entry, curr,
 				p.Size,
 				pnlColor, pnlSign, p.PnL.InexactFloat64(), cReset,
-				d.formatDuration(p.HoldTime),
+				statusColor, statusText, cReset,
+			))
+		} else if width >= 50 {
+			buf.WriteString(fmt.Sprintf("%-5s │ %s%-4s%s │ %3.0f¢ │ %s%s%.2f%s │ %s%s%s\n",
+				p.Asset,
+				sideColor, p.Side, cReset,
+				entry,
+				pnlColor, pnlSign, p.PnL.InexactFloat64(), cReset,
+				statusColor, statusText, cReset,
 			))
 		} else {
-			buf.WriteString(fmt.Sprintf("%-5s %s%-4s%s %s%s%.2f%s\n",
+			buf.WriteString(fmt.Sprintf("%-5s │ %s%-4s%s │ %s%s%.2f%s\n",
 				p.Asset,
 				sideColor, p.Side, cReset,
 				pnlColor, pnlSign, p.PnL.InexactFloat64(), cReset,
@@ -714,67 +760,93 @@ func (d *ResponsiveDash) renderSignalsContent(buf *strings.Builder, width, heigh
 
 func (d *ResponsiveDash) renderMLSignalsContent(buf *strings.Builder, width, height int) {
 	if len(d.mlSignals) == 0 {
-		buf.WriteString(cDim + "No ML signals yet...\n" + cReset)
-		buf.WriteString(cDim + "Waiting for analysis..." + cReset)
+		buf.WriteString(cDim + "Analyzing markets...\n" + cReset)
+		buf.WriteString(cDim + "ML model processing..." + cReset)
 		return
 	}
 
-	// Header
-	if width >= 55 {
-		buf.WriteString(fmt.Sprintf("%sASSET    SIDE   P(REV)   EDGE     EV      SIGNAL%s\n",
-			cSecondary+cUnderline, cReset))
+	// Professional table header with separators
+	if width >= 70 {
+		buf.WriteString(fmt.Sprintf("%sAsset  │ Side │ P(win) │ Edge  │   EV   │ Signal%s\n",
+			cSecondary, cReset))
+		buf.WriteString(cDim + "───────┼──────┼────────┼───────┼────────┼──────────" + cReset + "\n")
+	} else if width >= 45 {
+		buf.WriteString(fmt.Sprintf("%sAsset │ Side │ P(win) │ Signal%s\n",
+			cSecondary, cReset))
+		buf.WriteString(cDim + "──────┼──────┼────────┼──────────" + cReset + "\n")
 	} else {
-		buf.WriteString(fmt.Sprintf("%sASSET SIDE  SIGNAL%s\n", cSecondary+cUnderline, cReset))
+		buf.WriteString(fmt.Sprintf("%sAsset │ Side │ Signal%s\n", cSecondary, cReset))
+		buf.WriteString(cDim + "──────┼──────┼────────" + cReset + "\n")
 	}
 
 	row := 0
 	for _, ml := range d.mlSignals {
-		if row >= height-2 {
+		if row >= height-3 {
 			break
 		}
 
-		// Side color
+		// Side color with icon
 		sideColor := cSuccess
-		sideIcon := arrowUp
+		sideIcon := "▲"
 		if ml.Side == "DOWN" {
 			sideColor = cDanger
-			sideIcon = arrowDown
+			sideIcon = "▼"
 		}
 
-		// Signal color based on signal strength
+		// Signal color and icon based on signal strength
 		sigColor := cDim
+		sigIcon := "◌"
 		switch ml.Signal {
-		case "STRONG_BUY", "BUY":
+		case "STRONG_BUY":
+			sigColor = cSuccess + cBold
+			sigIcon = "◉"
+		case "BUY":
 			sigColor = cSuccess
+			sigIcon = "●"
 		case "STRONG_SELL", "SELL":
 			sigColor = cDanger
+			sigIcon = "○"
 		case "HOLD":
 			sigColor = cWarning
+			sigIcon = "◐"
+		case "SKIP":
+			sigColor = cDim
+			sigIcon = "◌"
 		}
 
-		// P(rev) color based on probability
+		// P(win) color based on probability
 		probColor := cDim
-		if ml.ProbRev >= 0.7 {
+		prob := ml.ProbRev * 100
+		if prob >= 70 {
+			probColor = cSuccess + cBold
+		} else if prob >= 55 {
 			probColor = cSuccess
-		} else if ml.ProbRev >= 0.5 {
+		} else if prob >= 45 {
 			probColor = cWarning
 		} else {
 			probColor = cDanger
 		}
 
-		if width >= 55 {
-			buf.WriteString(fmt.Sprintf("%-8s %s%s%-4s%s  %s%5.1f%%%s  %-6s  %-6s  %s%s%s\n",
+		if width >= 70 {
+			buf.WriteString(fmt.Sprintf("%-6s │ %s%s%-3s%s │ %s%5.1f%%%s │ %-5s │ %-6s │ %s%s %s%s\n",
 				ml.Asset,
 				sideColor, sideIcon, ml.Side, cReset,
-				probColor, ml.ProbRev*100, cReset,
+				probColor, prob, cReset,
 				ml.Edge,
 				ml.EV,
+				sigColor, sigIcon, ml.Signal, cReset,
+			))
+		} else if width >= 45 {
+			buf.WriteString(fmt.Sprintf("%-5s │ %s%s%-2s%s │ %s%4.0f%%%s │ %s%s%s\n",
+				ml.Asset,
+				sideColor, sideIcon, ml.Side[:2], cReset,
+				probColor, prob, cReset,
 				sigColor, ml.Signal, cReset,
 			))
 		} else {
-			buf.WriteString(fmt.Sprintf("%-5s %s%-3s%s  %s%s%s\n",
+			buf.WriteString(fmt.Sprintf("%-5s │ %s%s%s │ %s%s%s\n",
 				ml.Asset,
-				sideColor, ml.Side[:3], cReset,
+				sideColor, sideIcon, cReset,
 				sigColor, ml.Signal, cReset,
 			))
 		}
