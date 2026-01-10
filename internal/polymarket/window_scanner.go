@@ -33,6 +33,10 @@ type PredictionWindow struct {
 	YesPrice decimal.Decimal // Price for "Up" outcome
 	NoPrice  decimal.Decimal // Price for "Down" outcome
 
+	// Price to Beat - the reference price from Polymarket!
+	PriceToBeat decimal.Decimal // Starting price for resolution
+	CurrentPrice decimal.Decimal // Current price from Polymarket's feed
+
 	// Market info
 	Volume    decimal.Decimal
 	Liquidity decimal.Decimal
@@ -96,8 +100,8 @@ func (s *WindowScanner) scanLoop() {
 	// Scan immediately
 	s.scan()
 
-	// Then scan every 5 seconds for fast window detection
-	ticker := time.NewTicker(5 * time.Second)
+	// Scan every 2 seconds for FAST odds detection - latency is everything!
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -203,6 +207,7 @@ func (s *WindowScanner) fetchWindowBySlug(slug string) (*PredictionWindow, error
 		ID             string `json:"id"`
 		Title          string `json:"title"`
 		Slug           string `json:"slug"`
+		Description    string `json:"description"` // Contains price to beat info!
 		Active         bool   `json:"active"`
 		Closed         bool   `json:"closed"`
 		EndDate        string `json:"endDate"`
@@ -212,6 +217,7 @@ func (s *WindowScanner) fetchWindowBySlug(slug string) (*PredictionWindow, error
 			ID             string `json:"id"`
 			ConditionID    string `json:"conditionId"`
 			Question       string `json:"question"`
+			Description    string `json:"description"` // May contain current price info
 			Outcomes       string `json:"outcomes"`
 			OutcomePrices  string `json:"outcomePrices"`
 			ClobTokenIds   string `json:"clobTokenIds"`
@@ -288,6 +294,10 @@ func (s *WindowScanner) fetchWindowBySlug(slug string) (*PredictionWindow, error
 		windowMinutes = 240
 	}
 
+	// Extract price to beat from description
+	// Format: "Price to beat: $90,385.67" or similar
+	priceToBeat := s.extractPriceToBeat(event.Description + " " + market.Description)
+
 	return &PredictionWindow{
 		ID:            market.ID,
 		ConditionID:   market.ConditionID,
@@ -298,6 +308,7 @@ func (s *WindowScanner) fetchWindowBySlug(slug string) (*PredictionWindow, error
 		NoTokenID:     tokenIDs[1], // Down token
 		YesPrice:      yesPrice,
 		NoPrice:       noPrice,
+		PriceToBeat:   priceToBeat,
 		Volume:        volume,
 		StartDate:     startDate,
 		EndDate:       endDate,
@@ -370,4 +381,71 @@ func (s *WindowScanner) GetBestWindow() *PredictionWindow {
 	}
 
 	return best
+}
+
+// extractPriceToBeat extracts price from description text
+// Looks for patterns like "$90,385.67" or "price to beat: $3,080.45"
+func (s *WindowScanner) extractPriceToBeat(text string) decimal.Decimal {
+	// Common patterns in Polymarket descriptions
+	// Pattern: $XX,XXX.XX or $XXXX.XX
+	
+	// Look for dollar amount after common keywords
+	text = strings.ToLower(text)
+	
+	// Keywords that precede the price
+	keywords := []string{
+		"price to beat:",
+		"price to beat",
+		"starting price:",
+		"starting price",
+		"reference price:",
+		"reference price",
+	}
+	
+	for _, kw := range keywords {
+		idx := strings.Index(text, kw)
+		if idx >= 0 {
+			// Extract text after keyword
+			after := text[idx+len(kw):]
+			price := s.parseFirstPrice(after)
+			if !price.IsZero() {
+				return price
+			}
+		}
+	}
+	
+	return decimal.Zero
+}
+
+// parseFirstPrice extracts the first dollar price from text
+func (s *WindowScanner) parseFirstPrice(text string) decimal.Decimal {
+	// Find $ followed by digits
+	start := strings.Index(text, "$")
+	if start < 0 {
+		return decimal.Zero
+	}
+	
+	// Extract number after $
+	numStr := ""
+	for i := start + 1; i < len(text); i++ {
+		c := text[i]
+		if (c >= '0' && c <= '9') || c == '.' || c == ',' {
+			if c != ',' { // Skip commas
+				numStr += string(c)
+			}
+		} else if len(numStr) > 0 {
+			break
+		}
+	}
+	
+	if numStr == "" {
+		return decimal.Zero
+	}
+	
+	price, err := decimal.NewFromString(numStr)
+	if err != nil {
+		return decimal.Zero
+	}
+	
+	return price
 }

@@ -209,15 +209,13 @@ func (s *ScalperStrategy) checkWindows() {
 		s.mu.Unlock()
 
 		// Update dashboard with prices
+		// Use PriceToBeat from window if available!
 		binPrice := decimal.Zero
-		clPrice := decimal.Zero
+		priceToBeat := w.PriceToBeat // From Polymarket API
 		if s.engine != nil {
 			binPrice = s.engine.GetCurrentPrice()
-			if state := s.engine.GetWindowState(w.ID); state != nil && !state.StartPrice.IsZero() {
-				clPrice = state.StartPrice // Use start price as reference
-			}
 		}
-		s.dashUpdatePrices(asset, binPrice, clPrice, w.YesPrice, w.NoPrice)
+		s.dashUpdatePrices(asset, binPrice, priceToBeat, w.YesPrice, w.NoPrice)
 
 		// Log position state periodically (every ~5 seconds)
 		if time.Now().Second()%5 == 0 {
@@ -225,6 +223,7 @@ func (s *ScalperStrategy) checkWindows() {
 				Str("asset", asset).
 				Bool("has_position", hasPos).
 				Int("total_positions", numPositions).
+				Str("price_to_beat", priceToBeat.StringFixed(2)).
 				Msg("📊 [SCALP] Position check")
 		}
 
@@ -308,6 +307,9 @@ func (s *ScalperStrategy) findScalpOpportunity(w *polymarket.PredictionWindow) {
 		)
 
 		if !features.ShouldTrade {
+			// Update dashboard with skipped opportunity
+			s.dashAddOpportunity(asset, features.CheapSide, features.CheapPrice, features.ProfitProbability, "🔴 SKIP", features.Reason)
+			
 			log.Debug().
 				Str("asset", asset).
 				Str("up", upPrice.String()).
@@ -318,7 +320,67 @@ func (s *ScalperStrategy) findScalpOpportunity(w *polymarket.PredictionWindow) {
 			return
 		}
 
+		// ═══════════════════════════════════════════════════════════════════
+		// CRITICAL: VALIDATE DIRECTION MATCHES PRICE MOVEMENT!
+		// If price went UP but we want to buy DOWN → WRONG! Price justified the odds!
+		// ═══════════════════════════════════════════════════════════════════
+		
+		// First, try to use PriceToBeat from window (most accurate!)
+		var startPrice decimal.Decimal
+		var currentPrice decimal.Decimal
+		
+		if !w.PriceToBeat.IsZero() {
+			startPrice = w.PriceToBeat
+			log.Debug().Str("asset", asset).Str("price_to_beat", startPrice.StringFixed(2)).Msg("📊 Using Polymarket's Price to Beat")
+		}
+		
+		// Get current price from engine
+		if s.engine != nil {
+			currentPrice = s.engine.GetCurrentPrice()
+			
+			// If we don't have PriceToBeat, use engine's tracked start price
+			if startPrice.IsZero() {
+				if state := s.engine.GetWindowState(w.ID); state != nil && !state.StartPrice.IsZero() {
+					startPrice = state.StartPrice
+				}
+			}
+		}
+		
+		// Validate direction
+		if !startPrice.IsZero() && !currentPrice.IsZero() {
+			priceWentUp := currentPrice.GreaterThan(startPrice)
+			priceDiff := currentPrice.Sub(startPrice).Abs()
+			priceDiffPct := priceDiff.Div(startPrice).Mul(decimal.NewFromInt(100))
+			
+			// If price moved >0.03% and we're betting AGAINST the move, SKIP!
+			// Lowered threshold for faster detection
+			if priceDiffPct.GreaterThan(decimal.NewFromFloat(0.03)) {
+				if (priceWentUp && features.CheapSide == "DOWN") ||
+				   (!priceWentUp && features.CheapSide == "UP") {
+					log.Warn().
+						Str("asset", asset).
+						Str("cheap_side", features.CheapSide).
+						Bool("price_up", priceWentUp).
+						Str("move_pct", priceDiffPct.StringFixed(3)+"%").
+						Str("price_to_beat", startPrice.StringFixed(2)).
+						Str("current_price", currentPrice.StringFixed(2)).
+						Msg("🚫 [SCALP] BLOCKED! Price moved AGAINST our bet - odds are JUSTIFIED!")
+					s.dashAddOpportunity(asset, features.CheapSide, features.CheapPrice, features.ProfitProbability, "🚫 BLOCK", "Price moved against bet")
+					return
+				}
+				// Price moved in OUR favor - good signal!
+				log.Info().
+					Str("asset", asset).
+					Str("side", features.CheapSide).
+					Bool("price_up", priceWentUp).
+					Str("move_pct", priceDiffPct.StringFixed(3)+"%").
+					Msg("✅ [SCALP] Price moving in our favor!")
+			}
+		}
+
 		// ML says GO! Log the analysis
+		s.dashAddOpportunity(asset, features.CheapSide, features.CheapPrice, features.ProfitProbability, "🟢 BUY", "ML recommends trade")
+		
 		log.Info().
 			Str("asset", asset).
 			Str("side", features.CheapSide).
@@ -1123,4 +1185,12 @@ func (s *ScalperStrategy) dashLog(msg string) {
 		return
 	}
 	s.dash.AddLog(msg)
+}
+
+// dashAddOpportunity logs an opportunity to dashboard
+func (s *ScalperStrategy) dashAddOpportunity(asset, side string, price, probability decimal.Decimal, signal, reason string) {
+	if s.dash == nil {
+		return
+	}
+	s.dash.AddOpportunity(asset, side, price, probability, signal, reason)
 }

@@ -10,7 +10,15 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Dashboard provides a live-updating terminal UI for the trading bot
+// Dashboard provides a live-updating 4-quadrant terminal UI
+// ┌─────────────────────────────┬─────────────────────────────┐
+// │  📊 MARKET DATA             │  📈 ACTIVE POSITIONS        │
+// │  Live prices & Price2Beat   │  Open trades with P&L       │
+// ├─────────────────────────────┼─────────────────────────────┤
+// │  🎯 OPPORTUNITIES           │  📋 ACTIVITY LOG            │
+// │  ML signals & cheap sides   │  Recent bot activity        │
+// └─────────────────────────────┴─────────────────────────────┘
+
 type Dashboard struct {
 	mu sync.RWMutex
 
@@ -31,11 +39,14 @@ type Dashboard struct {
 	balance       decimal.Decimal
 
 	// Logs buffer
-	logs      []string
-	maxLogs   int
+	logs    []string
+	maxLogs int
 
 	// Price data
 	prices map[string]PriceInfo
+
+	// Opportunities detected
+	opportunities []Opportunity
 
 	// Update channel
 	updateCh chan struct{}
@@ -43,48 +54,61 @@ type Dashboard struct {
 }
 
 type Position struct {
-	Asset      string
-	Side       string
-	EntryPrice decimal.Decimal
+	Asset        string
+	Side         string
+	EntryPrice   decimal.Decimal
 	CurrentPrice decimal.Decimal
-	Size       int64
-	PnL        decimal.Decimal
-	PnLPct     decimal.Decimal
-	HoldTime   time.Duration
-	Status     string // "OPEN", "SELLING", "COOLDOWN"
+	Size         int64
+	PnL          decimal.Decimal
+	PnLPct       decimal.Decimal
+	HoldTime     time.Duration
+	Status       string // "OPEN", "SELLING", "COOLDOWN"
+	EntryTime    time.Time
 }
 
 type TradeLog struct {
-	Time      time.Time
-	Asset     string
-	Action    string // "BUY", "SELL", "STOP"
-	Price     decimal.Decimal
-	Size      int64
-	PnL       decimal.Decimal
-	Result    string // "✅", "❌", "⏳"
+	Time   time.Time
+	Asset  string
+	Action string // "BUY", "SELL", "STOP"
+	Price  decimal.Decimal
+	Size   int64
+	PnL    decimal.Decimal
+	Result string // "✅", "❌", "⏳"
 }
 
 type PriceInfo struct {
-	Asset     string
-	Binance   decimal.Decimal
-	Chainlink decimal.Decimal
-	UpOdds    decimal.Decimal
-	DownOdds  decimal.Decimal
-	Updated   time.Time
+	Asset       string
+	Binance     decimal.Decimal
+	Chainlink   decimal.Decimal
+	PriceToBeat decimal.Decimal
+	UpOdds      decimal.Decimal
+	DownOdds    decimal.Decimal
+	Updated     time.Time
+}
+
+type Opportunity struct {
+	Asset       string
+	Side        string
+	Price       decimal.Decimal
+	Probability decimal.Decimal
+	Signal      string // "🟢 BUY", "🟡 WAIT", "🔴 SKIP"
+	Reason      string
+	Time        time.Time
 }
 
 // New creates a new dashboard
 func New() *Dashboard {
 	return &Dashboard{
-		positions:    make(map[string]*Position),
-		recentTrades: make([]TradeLog, 0),
-		logs:         make([]string, 0),
-		maxLogs:      10,
-		prices:       make(map[string]PriceInfo),
-		totalProfit:  decimal.Zero,
-		balance:      decimal.Zero,
-		updateCh:     make(chan struct{}, 100),
-		stopCh:       make(chan struct{}),
+		positions:     make(map[string]*Position),
+		recentTrades:  make([]TradeLog, 0),
+		logs:          make([]string, 0),
+		maxLogs:       8,
+		prices:        make(map[string]PriceInfo),
+		opportunities: make([]Opportunity, 0),
+		totalProfit:   decimal.Zero,
+		balance:       decimal.Zero,
+		updateCh:      make(chan struct{}, 100),
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -112,6 +136,12 @@ func (d *Dashboard) UpdatePosition(asset, side string, entry, current decimal.De
 		pnlPct = current.Sub(entry).Div(entry).Mul(decimal.NewFromInt(100))
 	}
 
+	existing, exists := d.positions[asset]
+	entryTime := time.Now()
+	if exists {
+		entryTime = existing.EntryTime
+	}
+
 	d.positions[asset] = &Position{
 		Asset:        asset,
 		Side:         side,
@@ -121,6 +151,7 @@ func (d *Dashboard) UpdatePosition(asset, side string, entry, current decimal.De
 		PnL:          pnl,
 		PnLPct:       pnlPct,
 		Status:       status,
+		EntryTime:    entryTime,
 	}
 
 	d.triggerUpdate()
@@ -172,14 +203,70 @@ func (d *Dashboard) UpdateStats(totalTrades, winningTrades int, totalProfit, bal
 func (d *Dashboard) UpdatePrice(asset string, binance, chainlink, upOdds, downOdds decimal.Decimal) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.prices[asset] = PriceInfo{
-		Asset:     asset,
-		Binance:   binance,
-		Chainlink: chainlink,
-		UpOdds:    upOdds,
-		DownOdds:  downOdds,
-		Updated:   time.Now(),
+
+	existing, exists := d.prices[asset]
+	priceToBeat := decimal.Zero
+	if exists {
+		priceToBeat = existing.PriceToBeat
 	}
+
+	d.prices[asset] = PriceInfo{
+		Asset:       asset,
+		Binance:     binance,
+		Chainlink:   chainlink,
+		PriceToBeat: priceToBeat,
+		UpOdds:      upOdds,
+		DownOdds:    downOdds,
+		Updated:     time.Now(),
+	}
+	d.triggerUpdate()
+}
+
+// UpdatePriceToBeat updates the price to beat for a window
+func (d *Dashboard) UpdatePriceToBeat(asset string, priceToBeat decimal.Decimal) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if existing, exists := d.prices[asset]; exists {
+		existing.PriceToBeat = priceToBeat
+		d.prices[asset] = existing
+	}
+	d.triggerUpdate()
+}
+
+// AddOpportunity adds a detected opportunity
+func (d *Dashboard) AddOpportunity(asset, side string, price, probability decimal.Decimal, signal, reason string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	opp := Opportunity{
+		Asset:       asset,
+		Side:        side,
+		Price:       price,
+		Probability: probability,
+		Signal:      signal,
+		Reason:      reason,
+		Time:        time.Now(),
+	}
+
+	// Keep only latest per asset
+	found := false
+	for i, o := range d.opportunities {
+		if o.Asset == asset {
+			d.opportunities[i] = opp
+			found = true
+			break
+		}
+	}
+	if !found {
+		d.opportunities = append(d.opportunities, opp)
+	}
+
+	// Keep max 5
+	if len(d.opportunities) > 5 {
+		d.opportunities = d.opportunities[len(d.opportunities)-5:]
+	}
+
 	d.triggerUpdate()
 }
 
@@ -219,6 +306,11 @@ func (d *Dashboard) refreshLoop() {
 	}
 }
 
+const (
+	totalWidth = 120
+	halfWidth  = 58
+)
+
 func (d *Dashboard) render() {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -227,11 +319,13 @@ func (d *Dashboard) render() {
 	fmt.Print("\033[H\033[2J")
 
 	// Colors
-	headerColor := color.New(color.FgCyan, color.Bold)
-	greenColor := color.New(color.FgGreen)
-	redColor := color.New(color.FgRed)
-	yellowColor := color.New(color.FgYellow)
-	
+	cyan := color.New(color.FgCyan, color.Bold)
+	green := color.New(color.FgGreen)
+	red := color.New(color.FgRed)
+	yellow := color.New(color.FgYellow)
+	white := color.New(color.FgWhite)
+	dim := color.New(color.FgHiBlack)
+
 	// Header
 	uptime := time.Since(d.startTime).Round(time.Second)
 	winRate := 0.0
@@ -239,134 +333,259 @@ func (d *Dashboard) render() {
 		winRate = float64(d.winningTrades) / float64(d.totalTrades) * 100
 	}
 
-	headerColor.Println("╔══════════════════════════════════════════════════════════════════════════════╗")
-	headerColor.Printf("║  🤖 POLYBOT ML SCALPER                                                       ║\n")
-	headerColor.Printf("║  Uptime: %-10s | Trades: %-3d | Win Rate: %5.1f%% | P&L: %-10s     ║\n",
+	cyan.Printf("┌")
+	cyan.Printf("%s", strings.Repeat("─", totalWidth-2))
+	cyan.Printf("┐\n")
+
+	// Title bar
+	title := fmt.Sprintf("  🤖 POLYBOT ML SCALPER v4.0  │  ⏱ %s  │  📊 %d trades  │  🎯 %.1f%% win  │  💰 %s  ",
 		uptime, d.totalTrades, winRate, d.formatPnL(d.totalProfit))
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-
-	// Prices Table
-	headerColor.Println("║  📊 MARKET PRICES                                                            ║")
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-	
-	if len(d.prices) > 0 {
-		fmt.Printf("║  %-6s │ %-12s │ %-12s │ %-8s │ %-8s │ %-6s        ║\n",
-			"Asset", "Binance", "Chainlink", "UP", "DOWN", "Cheap")
-		fmt.Println("║  " + strings.Repeat("─", 72) + "  ║")
-		
-		for _, p := range d.prices {
-			cheap := ""
-			if p.UpOdds.LessThan(decimal.NewFromFloat(0.15)) {
-				cheap = "UP ⬆️"
-			} else if p.DownOdds.LessThan(decimal.NewFromFloat(0.15)) {
-				cheap = "DOWN ⬇️"
-			}
-			
-			fmt.Printf("║  %-6s │ $%-11s │ $%-11s │ %-8s │ %-8s │ %-10s  ║\n",
-				p.Asset,
-				p.Binance.StringFixed(2),
-				p.Chainlink.StringFixed(2),
-				p.UpOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
-				p.DownOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
-				cheap)
-		}
+	cyan.Printf("│")
+	if d.totalProfit.GreaterThanOrEqual(decimal.Zero) {
+		green.Printf("%-*s", totalWidth-2, title)
 	} else {
-		fmt.Println("║  Waiting for price data...                                                     ║")
+		red.Printf("%-*s", totalWidth-2, title)
+	}
+	cyan.Printf("│\n")
+
+	// Divider with split
+	cyan.Printf("├")
+	cyan.Printf("%s", strings.Repeat("─", halfWidth))
+	cyan.Printf("┬")
+	cyan.Printf("%s", strings.Repeat("─", halfWidth))
+	cyan.Printf("┤\n")
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// TOP ROW: Market Data (left) | Positions (right)
+	// ═══════════════════════════════════════════════════════════════════════
+
+	// Section headers
+	cyan.Printf("│")
+	cyan.Printf(" 📊 MARKET DATA & PRICE TO BEAT")
+	cyan.Printf("%s", strings.Repeat(" ", halfWidth-31))
+	cyan.Printf("│")
+	cyan.Printf(" 📈 ACTIVE POSITIONS")
+	cyan.Printf("%s", strings.Repeat(" ", halfWidth-21))
+	cyan.Printf("│\n")
+
+	// Prepare market data lines
+	marketLines := make([]string, 0)
+	marketLines = append(marketLines, fmt.Sprintf(" %-5s │ %-11s │ %-11s │ %-5s │ %-5s", "Asset", "Live Price", "Price2Beat", "UP", "DOWN"))
+	marketLines = append(marketLines, " "+strings.Repeat("─", halfWidth-3))
+
+	for _, p := range d.prices {
+		priceStr := "$" + p.Binance.StringFixed(2)
+		p2bStr := "$" + p.PriceToBeat.StringFixed(2)
+		if p.PriceToBeat.IsZero() {
+			p2bStr = "waiting..."
+		}
+		upStr := p.UpOdds.Mul(decimal.NewFromInt(100)).StringFixed(0) + "¢"
+		downStr := p.DownOdds.Mul(decimal.NewFromInt(100)).StringFixed(0) + "¢"
+
+		// Highlight cheap side
+		if p.UpOdds.LessThan(decimal.NewFromFloat(0.20)) {
+			upStr = "→" + upStr
+		}
+		if p.DownOdds.LessThan(decimal.NewFromFloat(0.20)) {
+			downStr = "→" + downStr
+		}
+
+		marketLines = append(marketLines, fmt.Sprintf(" %-5s │ %-11s │ %-11s │ %-5s │ %-5s",
+			p.Asset, priceStr, p2bStr, upStr, downStr))
 	}
 
-	// Positions Table
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-	headerColor.Println("║  📈 ACTIVE POSITIONS                                                         ║")
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+	if len(d.prices) == 0 {
+		marketLines = append(marketLines, " Waiting for price data...")
+	}
 
-	if len(d.positions) > 0 {
-		fmt.Printf("║  %-5s │ %-4s │ %-7s │ %-7s │ %-5s │ %-10s │ %-8s │ %-8s ║\n",
-			"Asset", "Side", "Entry", "Current", "Size", "P&L", "P&L %", "Status")
-		fmt.Println("║  " + strings.Repeat("─", 72) + "  ║")
+	// Prepare position lines
+	posLines := make([]string, 0)
+	posLines = append(posLines, fmt.Sprintf(" %-4s │ %-4s │ %-6s │ %-6s │ %-5s │ %-8s", "ASSET", "SIDE", "ENTRY", "NOW", "SIZE", "P&L"))
+	posLines = append(posLines, " "+strings.Repeat("─", halfWidth-3))
 
+	if len(d.positions) == 0 {
+		posLines = append(posLines, " No positions - scanning...")
+	} else {
 		for _, pos := range d.positions {
+			entryStr := pos.EntryPrice.Mul(decimal.NewFromInt(100)).StringFixed(0) + "¢"
+			nowStr := pos.CurrentPrice.Mul(decimal.NewFromInt(100)).StringFixed(0) + "¢"
 			pnlStr := d.formatPnL(pos.PnL)
-			pnlPctStr := pos.PnLPct.StringFixed(1) + "%"
-			
-			statusIcon := "🟢"
+			status := "🟢"
 			if pos.Status == "SELLING" {
-				statusIcon = "🔄"
-			} else if pos.Status == "COOLDOWN" {
-				statusIcon = "⏳"
+				status = "🔄"
+			}
+			posLines = append(posLines, fmt.Sprintf(" %s%-3s │ %-4s │ %-6s │ %-6s │ %-5d │ %-8s",
+				status, pos.Asset, pos.Side, entryStr, nowStr, pos.Size, pnlStr))
+		}
+	}
+
+	// Print top section (max 8 lines each)
+	maxTopLines := 8
+	for i := 0; i < maxTopLines; i++ {
+		cyan.Printf("│")
+
+		// Left side - market data
+		if i < len(marketLines) {
+			line := marketLines[i]
+			if len(line) > halfWidth-1 {
+				line = line[:halfWidth-1]
 			}
 
-			if pos.PnL.GreaterThan(decimal.Zero) {
-				greenColor.Printf("║  %-5s │ %-4s │ %-7s │ %-7s │ %-5d │ %-10s │ %-8s │ %s %-6s ║\n",
-					pos.Asset, pos.Side,
-					pos.EntryPrice.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
-					pos.CurrentPrice.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
-					pos.Size, pnlStr, pnlPctStr, statusIcon, pos.Status)
+			// Color cheap prices
+			if strings.Contains(line, "→") {
+				yellow.Printf("%-*s", halfWidth, line)
 			} else {
-				redColor.Printf("║  %-5s │ %-4s │ %-7s │ %-7s │ %-5d │ %-10s │ %-8s │ %s %-6s ║\n",
-					pos.Asset, pos.Side,
-					pos.EntryPrice.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
-					pos.CurrentPrice.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
-					pos.Size, pnlStr, pnlPctStr, statusIcon, pos.Status)
+				white.Printf("%-*s", halfWidth, line)
 			}
+		} else {
+			fmt.Printf("%s", strings.Repeat(" ", halfWidth))
 		}
-	} else {
-		yellowColor.Println("║  No active positions - scanning for opportunities...                         ║")
+
+		cyan.Printf("│")
+
+		// Right side - positions
+		if i < len(posLines) {
+			line := posLines[i]
+			if len(line) > halfWidth-1 {
+				line = line[:halfWidth-1]
+			}
+
+			// Color by P&L
+			if strings.Contains(line, "+$") {
+				green.Printf("%-*s", halfWidth, line)
+			} else if strings.Contains(line, "-$") {
+				red.Printf("%-*s", halfWidth, line)
+			} else {
+				white.Printf("%-*s", halfWidth, line)
+			}
+		} else {
+			fmt.Printf("%s", strings.Repeat(" ", halfWidth))
+		}
+
+		cyan.Printf("│\n")
 	}
 
-	// Recent Trades
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-	headerColor.Println("║  📜 RECENT TRADES                                                            ║")
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
+	// Middle divider
+	cyan.Printf("├")
+	cyan.Printf("%s", strings.Repeat("─", halfWidth))
+	cyan.Printf("┼")
+	cyan.Printf("%s", strings.Repeat("─", halfWidth))
+	cyan.Printf("┤\n")
 
+	// ═══════════════════════════════════════════════════════════════════════
+	// BOTTOM ROW: Opportunities (left) | Logs (right)
+	// ═══════════════════════════════════════════════════════════════════════
+
+	// Section headers
+	cyan.Printf("│")
+	cyan.Printf(" 🎯 ML SIGNALS & OPPORTUNITIES")
+	cyan.Printf("%s", strings.Repeat(" ", halfWidth-31))
+	cyan.Printf("│")
+	cyan.Printf(" 📋 ACTIVITY LOG")
+	cyan.Printf("%s", strings.Repeat(" ", halfWidth-17))
+	cyan.Printf("│\n")
+
+	// Prepare opportunity lines
+	oppLines := make([]string, 0)
+	oppLines = append(oppLines, fmt.Sprintf(" %-4s │ %-4s │ %-5s │ %-5s │ %-25s", "ASSET", "SIDE", "PRICE", "PROB", "SIGNAL"))
+	oppLines = append(oppLines, " "+strings.Repeat("─", halfWidth-3))
+
+	if len(d.opportunities) == 0 {
+		oppLines = append(oppLines, " Scanning for opportunities...")
+	} else {
+		for _, opp := range d.opportunities {
+			priceStr := opp.Price.Mul(decimal.NewFromInt(100)).StringFixed(0) + "¢"
+			probStr := opp.Probability.Mul(decimal.NewFromInt(100)).StringFixed(0) + "%"
+			reason := opp.Reason
+			if len(reason) > 25 {
+				reason = reason[:22] + "..."
+			}
+			oppLines = append(oppLines, fmt.Sprintf(" %-4s │ %-4s │ %-5s │ %-5s │ %-25s",
+				opp.Asset, opp.Side, priceStr, probStr, reason))
+		}
+	}
+
+	// Prepare log lines
+	logLines := make([]string, 0)
+	if len(d.logs) == 0 {
+		logLines = append(logLines, " Waiting for activity...")
+	} else {
+		for _, l := range d.logs {
+			if len(l) > halfWidth-2 {
+				l = l[:halfWidth-5] + "..."
+			}
+			logLines = append(logLines, " "+l)
+		}
+	}
+
+	// Print bottom section
+	maxBotLines := 8
+	for i := 0; i < maxBotLines; i++ {
+		cyan.Printf("│")
+
+		// Left side - opportunities
+		if i < len(oppLines) {
+			line := oppLines[i]
+			if len(line) > halfWidth-1 {
+				line = line[:halfWidth-1]
+			}
+
+			if strings.Contains(line, "🟢") || strings.Contains(line, "BUY") {
+				green.Printf("%-*s", halfWidth, line)
+			} else if strings.Contains(line, "🔴") || strings.Contains(line, "SKIP") {
+				red.Printf("%-*s", halfWidth, line)
+			} else {
+				white.Printf("%-*s", halfWidth, line)
+			}
+		} else {
+			fmt.Printf("%s", strings.Repeat(" ", halfWidth))
+		}
+
+		cyan.Printf("│")
+
+		// Right side - logs
+		if i < len(logLines) {
+			line := logLines[i]
+			if len(line) > halfWidth-1 {
+				line = line[:halfWidth-1]
+			}
+			dim.Printf("%-*s", halfWidth, line)
+		} else {
+			fmt.Printf("%s", strings.Repeat(" ", halfWidth))
+		}
+
+		cyan.Printf("│\n")
+	}
+
+	// Bottom border
+	cyan.Printf("└")
+	cyan.Printf("%s", strings.Repeat("─", halfWidth))
+	cyan.Printf("┴")
+	cyan.Printf("%s", strings.Repeat("─", halfWidth))
+	cyan.Printf("┘\n")
+
+	// Footer with recent trades
 	if len(d.recentTrades) > 0 {
-		for _, trade := range d.recentTrades {
-			pnlStr := ""
-			if trade.Action == "SELL" || trade.Action == "STOP" {
-				pnlStr = d.formatPnL(trade.PnL)
+		fmt.Printf("\n")
+		cyan.Printf("📜 Recent: ")
+		for i, t := range d.recentTrades {
+			if i >= 3 {
+				break
 			}
-			
-			actionColor := greenColor
-			if trade.Action == "SELL" {
-				actionColor = yellowColor
-			} else if trade.Action == "STOP" {
-				actionColor = redColor
+			priceStr := t.Price.Mul(decimal.NewFromInt(100)).StringFixed(0) + "¢"
+			if t.Action == "BUY" {
+				green.Printf("%s %s %s@%s ", t.Result, t.Action, t.Asset, priceStr)
+			} else if t.PnL.GreaterThan(decimal.Zero) {
+				green.Printf("%s %s %s %s ", t.Result, t.Action, t.Asset, d.formatPnL(t.PnL))
+			} else {
+				red.Printf("%s %s %s %s ", t.Result, t.Action, t.Asset, d.formatPnL(t.PnL))
 			}
-			
-			actionColor.Printf("║  %s [%s] %-4s %-5s @ %-5s x%-4d %s %-15s                  ║\n",
-				trade.Result,
-				trade.Time.Format("15:04:05"),
-				trade.Action,
-				trade.Asset,
-				trade.Price.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢",
-				trade.Size,
-				pnlStr,
-				"")
 		}
-	} else {
-		fmt.Println("║  No trades yet...                                                              ║")
+		fmt.Printf("\n")
 	}
 
-	// Logs
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-	headerColor.Println("║  📋 ACTIVITY LOG                                                             ║")
-	headerColor.Println("╠══════════════════════════════════════════════════════════════════════════════╣")
-
-	if len(d.logs) > 0 {
-		for _, log := range d.logs {
-			// Truncate if too long
-			if len(log) > 74 {
-				log = log[:71] + "..."
-			}
-			fmt.Printf("║  %-74s  ║\n", log)
-		}
-	} else {
-		fmt.Println("║  Waiting for activity...                                                       ║")
-	}
-
-	headerColor.Println("╚══════════════════════════════════════════════════════════════════════════════╝")
-	
-	// Footer
-	fmt.Printf("\nPress Ctrl+C to stop | Balance: $%.2f\n", d.balance.InexactFloat64())
+	// Status bar
+	dim.Printf("\nBalance: $%.2f │ Press Ctrl+C to stop │ Dashboard mode active\n", d.balance.InexactFloat64())
 }
 
 func (d *Dashboard) formatPnL(pnl decimal.Decimal) string {
