@@ -53,7 +53,13 @@ SignatureType    int    // 0=EOA, 1=Magic/Email, 2=Proxy
 
 	// Scalper Strategy Settings
 	ScalperPositionSize  decimal.Decimal // USD per scalp trade
-	ScalperEntryThreshold decimal.Decimal // Enter when odds drop to this (e.g., 0.25)
+	ScalperEntryThreshold decimal.Decimal // Enter when odds drop to this (e.g., 0.15)
+
+	// Swing Strategy Settings
+	SwingMaxPositionUSD decimal.Decimal // Max USD per swing trade
+	SwingMaxPositions   int             // Max concurrent swing positions
+	SwingMinDropPct     decimal.Decimal // Min drop % to trigger entry (e.g., 0.12 = 12¢)
+	SwingCooldownSec    int             // Cooldown between trades
 
 	// Triple Exit Strategy
 	ArbExitOddsThreshold decimal.Decimal // e.g., 0.75 = exit at 75¢ for quick flip
@@ -105,14 +111,20 @@ SignatureType:    getEnvInt("SIGNATURE_TYPE", 0),
 		ArbCooldownSeconds:   getEnvInt("ARB_COOLDOWN_SECONDS", 10),
 
 		// Scalper Strategy
-		ScalperPositionSize:   getEnvDecimal("SCALPER_POSITION_SIZE", decimal.NewFromFloat(1)),   // Default $1
-		ScalperEntryThreshold: getEnvDecimal("SCALPER_ENTRY_THRESHOLD", decimal.NewFromFloat(0.25)), // 25¢
+		ScalperPositionSize:   getEnvDecimal("SCALPER_POSITION_SIZE", decimal.NewFromFloat(0.50)),   // Default $0.50
+		ScalperEntryThreshold: getEnvDecimal("SCALPER_ENTRY_THRESHOLD", decimal.NewFromFloat(0.15)), // 15¢ max
+
+		// Swing Strategy
+		SwingMaxPositionUSD: getEnvDecimal("SWING_MAX_POSITION_USD", decimal.NewFromFloat(2.0)),
+		SwingMaxPositions:   getEnvInt("SWING_MAX_POSITIONS", 3),
+		SwingMinDropPct:     getEnvDecimal("SWING_MIN_DROP_PCT", decimal.NewFromFloat(0.12)),
+		SwingCooldownSec:    getEnvInt("SWING_COOLDOWN_SEC", 30),
 
 		// Triple Exit Strategy
 		ArbExitOddsThreshold: getEnvDecimal("ARB_EXIT_ODDS", decimal.NewFromFloat(0.75)),       // Sell at 75¢+
 		ArbHoldThreshold:     getEnvDecimal("ARB_HOLD_THRESHOLD", decimal.NewFromFloat(0.005)), // 0.5% BTC confirms direction
 		ArbStopLossPct:       getEnvDecimal("ARB_STOP_LOSS", decimal.NewFromFloat(0.20)),       // 🛑 20% stop-loss
-		Bankroll:             getEnvDecimal("BANKROLL", decimal.NewFromFloat(1000)),
+		Bankroll:             getEnvDecimal("BANKROLL", decimal.NewFromFloat(5)),               // Your current balance
 
 		// Database - supports PostgreSQL URL or SQLite path
 		DatabasePath: getEnv("DATABASE_URL", getEnv("DATABASE_PATH", "data/polybot.db")),
