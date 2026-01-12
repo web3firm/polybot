@@ -57,15 +57,15 @@ const (
 	cBgHeader = "\033[48;5;17m"  // Very dark blue
 	cBgRow    = "\033[48;5;234m" // Slightly lighter
 
-	// Box drawing - thin lines for clean look
-	boxTL = "┌"
-	boxTR = "┐"
-	boxBL = "└"
-	boxBR = "┘"
-	boxH  = "─"
-	boxV  = "│"
-	boxHB = "─" // Same as regular (thin)
-	boxVB = "│" // Same as regular (thin)
+	// Box drawing - thick double lines for institutional grade look
+	boxTL = "╔"
+	boxTR = "╗"
+	boxBL = "╚"
+	boxBR = "╝"
+	boxH  = "═"
+	boxV  = "║"
+	boxHB = "═"
+	boxVB = "║"
 
 	// Status indicators
 	dotFilled = "●"
@@ -352,44 +352,61 @@ func (d *ResponsiveDash) renderMedium(buf *strings.Builder) {
 	d.drawStatusBar(buf, d.width, d.height)
 }
 func (d *ResponsiveDash) renderWide(buf *strings.Builder) {
-	// Wide: 3 columns
+	// Bloomberg style: 3 panels top, 1 full-width log bottom
 	col1W := d.width / 3
 	col2W := d.width / 3
 	col3W := d.width - col1W - col2W
-	
-	// Calculate panel heights
-	halfH := (d.height - 8) / 2
-	if halfH < 5 {
-		halfH = 5
+
+	// Top panels get ~60% height, bottom log gets ~40%
+	topH := (d.height - 6) * 60 / 100
+	if topH < 8 {
+		topH = 8
+	}
+	bottomH := d.height - 6 - topH
+	if bottomH < 5 {
+		bottomH = 5
 	}
 
 	d.drawHeader(buf, d.width)
 	d.drawStatsBar(buf, d.width)
 
-	// Column 1: Market data (full height)
-	d.drawPanel(buf, "📊 MARKET DATA", 0, 4, col1W, d.height-8, d.renderMarketContent)
+	// Top row: Market Data | Positions | ML Signals
+	d.drawPanel(buf, "📊 MARKET DATA", 0, 4, col1W, topH, d.renderMarketContent)
+	d.drawPanel(buf, "📋 POSITIONS", col1W, 4, col2W, topH, d.renderPositionsContent)
+	d.drawPanel(buf, "🧠 ML SIGNALS", col1W+col2W, 4, col3W, topH, d.renderMLSignalsContent)
 
-	// Column 2: Positions (top) + ML Signals (bottom)
-	d.drawPanel(buf, "📋 POSITIONS", col1W, 4, col2W, halfH, d.renderPositionsContent)
-	d.drawPanel(buf, "🧠 ML SIGNALS", col1W, 4+halfH, col2W, halfH, d.renderMLSignalsContent)
-
-	// Column 3: Activity log (full height)
-	d.drawPanel(buf, "📝 ACTIVITY LOG", col1W+col2W, 4, col3W, d.height-8, d.renderLogContent)
+	// Bottom row: Full-width Activity Log
+	d.drawPanel(buf, "📝 ACTIVITY LOG", 0, 4+topH, d.width, bottomH, d.renderLogContent)
 
 	d.drawStatusBar(buf, d.width, d.height)
 }
 
 func (d *ResponsiveDash) renderUltra(buf *strings.Builder) {
-	// Ultra wide: 4 columns with detailed view
-	colW := d.width / 4
+	// Bloomberg style: 3 panels top, 1 full-width log bottom
+	col1W := d.width / 3
+	col2W := d.width / 3
+	col3W := d.width - col1W - col2W
+
+	// Top panels get ~55% height, bottom log gets ~45%
+	topH := (d.height - 6) * 55 / 100
+	if topH < 8 {
+		topH = 8
+	}
+	bottomH := d.height - 6 - topH
+	if bottomH < 6 {
+		bottomH = 6
+	}
 
 	d.drawHeader(buf, d.width)
 	d.drawStatsBar(buf, d.width)
 
-	d.drawPanel(buf, "📊 MARKET DATA", 0, 4, colW, d.height-8, d.renderMarketContent)
-	d.drawPanel(buf, "📋 POSITIONS", colW, 4, colW, d.height-8, d.renderPositionsContent)
-	d.drawPanel(buf, "🧠 ML SIGNALS", colW*2, 4, colW, d.height-8, d.renderMLSignalsContent)
-	d.drawPanel(buf, "📝 ACTIVITY LOG", colW*3, 4, colW, d.height-8, d.renderLogContent)
+	// Top row: Market Data | Positions | ML Signals
+	d.drawPanel(buf, "📊 MARKET DATA", 0, 4, col1W, topH, d.renderMarketContent)
+	d.drawPanel(buf, "📋 POSITIONS", col1W, 4, col2W, topH, d.renderPositionsContent)
+	d.drawPanel(buf, "🧠 ML SIGNALS", col1W+col2W, 4, col3W, topH, d.renderMLSignalsContent)
+
+	// Bottom row: Full-width Activity Log
+	d.drawPanel(buf, "📝 ACTIVITY LOG", 0, 4+topH, d.width, bottomH, d.renderLogContent)
 
 	d.drawStatusBar(buf, d.width, d.height)
 }
@@ -539,78 +556,82 @@ func (d *ResponsiveDash) drawStatusBar(buf *strings.Builder, width, height int) 
 // ═══════════════════════════════════════════════════════════════════════════
 
 func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height int) {
-	if len(d.markets) == 0 {
-		buf.WriteString(cDim + "Waiting for market data..." + cReset)
-		return
-	}
-
 	// Professional table header with separators
-	if width >= 70 {
-		buf.WriteString(fmt.Sprintf("%sAsset   │ Live Price  │ Price2Beat  │   UP   │  DOWN  │ Spread%s\n",
-			cSecondary, cReset))
-		buf.WriteString(cDim + "────────┼─────────────┼─────────────┼────────┼────────┼────────" + cReset + "\n")
-	} else if width >= 45 {
-		buf.WriteString(fmt.Sprintf("%sAsset  │ Live     │ P2B      │  UP  │ DOWN%s\n",
-			cSecondary, cReset))
-		buf.WriteString(cDim + "───────┼──────────┼──────────┼──────┼──────" + cReset + "\n")
+	// Institutional-grade table with thick borders and proper columns
+	if width >= 35 {
+		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-11s ║ %-11s ║ %-4s ║ %-4s%s\n",
+			cSecondary+cBold, "Asset", "Price2Beat", "LivePrice", "UP", "DOWN", cReset))
+		buf.WriteString(cSecondary + "══════╬════════════╬════════════╬═════╬═════" + cReset + "\n")
+	} else if width >= 20 {
+		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-9s ║ UP  ║ DOWN%s\n",
+			cSecondary+cBold, "Asset", "Price2Beat", cReset))
+		buf.WriteString(cSecondary + "══════╬══════════╬═════╬═════" + cReset + "\n")
 	} else {
-		buf.WriteString(fmt.Sprintf("%sAsset │  UP  │ DOWN%s\n", cSecondary, cReset))
-		buf.WriteString(cDim + "──────┼──────┼──────" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%sAsset ║ UP ║ DN%s\n", cSecondary+cBold, cReset))
+		buf.WriteString(cSecondary + "══════╬════╬════" + cReset + "\n")
 	}
 
+	// Fixed order: BTC, ETH, SOL - always stable
+	assets := []string{"BTC", "ETH", "SOL"}
 	row := 0
-	for _, m := range d.markets {
+	for _, asset := range assets {
+		m, exists := d.markets[asset]
+		if !exists {
+			// Show placeholder row if no data yet
+			if width >= 35 {
+				buf.WriteString(fmt.Sprintf("%-5s ║ %s%-11s%s ║ %-11s ║ %-4s ║ %-4s\n",
+					asset, cDim, "---", cReset, "---", "---", "---"))
+			} else if width >= 20 {
+				buf.WriteString(fmt.Sprintf("%-5s ║ %s%-9s%s ║ %-3s ║ %-3s\n",
+					asset, cDim, "---", cReset, "---", "---"))
+			} else {
+				buf.WriteString(fmt.Sprintf("%-5s ║ %-3s ║ %-3s\n", asset, "---", "---"))
+			}
+			row++
+			continue
+		}
 		if row >= height-3 {
 			break
 		}
 
-		// Determine trend indicator
-		trend := " "
-		if m.LivePrice.GreaterThan(m.PriceToBeat) {
-			trend = cSuccess + "▲" + cReset
-		} else if m.LivePrice.LessThan(m.PriceToBeat) {
-			trend = cDanger + "▼" + cReset
-		}
-
-		// Format odds with color - highlight cheap ones
+		// Format prices
+		livePrice := m.LivePrice.InexactFloat64()
+		priceToBeat := m.PriceToBeat.InexactFloat64()
 		upOdds := m.UpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64()
 		downOdds := m.DownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64()
 		
+		// Color odds - highlight cheap opportunities
 		upColor := cDim
 		downColor := cDim
-		if upOdds <= 20 {
+		if upOdds <= 25 {
 			upColor = cSuccess + cBold
-		} else if upOdds <= 35 {
+		} else if upOdds <= 40 {
 			upColor = cSuccess
 		}
-		if downOdds <= 20 {
+		if downOdds <= 25 {
 			downColor = cSuccess + cBold
-		} else if downOdds <= 35 {
+		} else if downOdds <= 40 {
 			downColor = cDanger
 		}
 
-		spread := m.Spread.Mul(decimal.NewFromInt(100)).InexactFloat64()
-
-		if width >= 70 {
-			buf.WriteString(fmt.Sprintf("%-7s │ %s$%-10.2f%s │ $%-10.2f │ %s%4.0f¢%s  │ %s%4.0f¢%s  │ %4.0f¢\n",
-				m.Asset,
-				trend, m.LivePrice.InexactFloat64(), cReset,
-				m.PriceToBeat.InexactFloat64(),
+		if width >= 35 {
+			buf.WriteString(fmt.Sprintf("%-5s ║ $%-10.2f ║ $%-10.2f ║ %s%3.0f¢%s ║ %s%3.0f¢%s\n",
+				asset,
+				priceToBeat,
+				livePrice,
 				upColor, upOdds, cReset,
 				downColor, downOdds, cReset,
-				spread,
 			))
-		} else if width >= 45 {
-			buf.WriteString(fmt.Sprintf("%-6s │ %s$%-7.2f%s │ $%-7.2f │ %s%3.0f¢%s │ %s%3.0f¢%s\n",
-				m.Asset,
-				trend, m.LivePrice.InexactFloat64(), cReset,
-				m.PriceToBeat.InexactFloat64(),
+		} else if width >= 20 {
+			buf.WriteString(fmt.Sprintf("%-6s ║ $%-9.2f ║ %s%3.0f¢%s ║ %s%3.0f¢%s\n",
+				asset,
+				priceToBeat,
 				upColor, upOdds, cReset,
 				downColor, downOdds, cReset,
 			))
 		} else {
-			buf.WriteString(fmt.Sprintf("%-5s │ %s%3.0f¢%s │ %s%3.0f¢%s\n",
-				m.Asset,
+			buf.WriteString(fmt.Sprintf("%-5s ║ %s%3.0f¢%s ║ %s%3.0f¢%s\n",
+				asset,
 				upColor, upOdds, cReset,
 				downColor, downOdds, cReset,
 			))
@@ -625,18 +646,18 @@ func (d *ResponsiveDash) renderPositionsContent(buf *strings.Builder, width, hei
 		return
 	}
 
-	// Professional table header with separators
+	// Professional table header with thick separators
 	if width >= 75 {
-		buf.WriteString(fmt.Sprintf("%sAsset  │ Side │ Entry │  Now  │ Size │   P&L   │ Status%s\n",
-			cSecondary, cReset))
-		buf.WriteString(cDim + "───────┼──────┼───────┼───────┼──────┼─────────┼────────" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%sAsset  ║ Side ║ Entry ║  Now  ║ Size ║   P&L   ║ Status%s\n",
+			cSecondary+cBold, cReset))
+		buf.WriteString(cSecondary + "═══════╬══════╬═══════╬═══════╬══════╬═════════╬════════" + cReset + "\n")
 	} else if width >= 50 {
-		buf.WriteString(fmt.Sprintf("%sAsset │ Side │ Entry │  P&L  │ Status%s\n",
-			cSecondary, cReset))
-		buf.WriteString(cDim + "──────┼──────┼───────┼───────┼───────" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%sAsset ║ Side ║ Entry ║  P&L  ║ Status%s\n",
+			cSecondary+cBold, cReset))
+		buf.WriteString(cSecondary + "══════╬══════╬═══════╬═══════╬═══════" + cReset + "\n")
 	} else {
-		buf.WriteString(fmt.Sprintf("%sAsset │ Side │  P&L%s\n", cSecondary, cReset))
-		buf.WriteString(cDim + "──────┼──────┼───────" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%sAsset ║ Side ║  P&L%s\n", cSecondary+cBold, cReset))
+		buf.WriteString(cSecondary + "══════╬══════╬═══════" + cReset + "\n")
 	}
 
 	row := 0
@@ -765,24 +786,39 @@ func (d *ResponsiveDash) renderMLSignalsContent(buf *strings.Builder, width, hei
 		return
 	}
 
-	// Professional table header with separators
+	// Professional table header with thick separators
 	if width >= 70 {
-		buf.WriteString(fmt.Sprintf("%sAsset  │ Side │ P(win) │ Edge  │   EV   │ Signal%s\n",
-			cSecondary, cReset))
-		buf.WriteString(cDim + "───────┼──────┼────────┼───────┼────────┼──────────" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%sAsset  ║ Side ║ P(win) ║ Edge  ║   EV   ║ Signal%s\n",
+			cSecondary+cBold, cReset))
+		buf.WriteString(cSecondary + "═══════╬══════╬════════╬═══════╬════════╬══════════" + cReset + "\n")
 	} else if width >= 45 {
-		buf.WriteString(fmt.Sprintf("%sAsset │ Side │ P(win) │ Signal%s\n",
-			cSecondary, cReset))
-		buf.WriteString(cDim + "──────┼──────┼────────┼──────────" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%sAsset ║ Side ║ Signal%s\n",
+			cSecondary+cBold, cReset))
+		buf.WriteString(cSecondary + "══════╬══════╬════════" + cReset + "\n")
 	} else {
-		buf.WriteString(fmt.Sprintf("%sAsset │ Side │ Signal%s\n", cSecondary, cReset))
-		buf.WriteString(cDim + "──────┼──────┼────────" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%sAsset ║ Side ║ Signal%s\n", cSecondary+cBold, cReset))
+		buf.WriteString(cSecondary + "══════╬══════╬════════" + cReset + "\n")
 	}
 
+	// Fixed order: BTC, ETH, SOL - always stable
+	assets := []string{"BTC", "ETH", "SOL"}
 	row := 0
-	for _, ml := range d.mlSignals {
+	for _, asset := range assets {
 		if row >= height-3 {
 			break
+		}
+
+		ml, exists := d.mlSignals[asset]
+		if !exists {
+			// Show placeholder row if no data yet
+			if width >= 45 {
+				buf.WriteString(fmt.Sprintf("%-6s │ %s  -  %s │ %s  -  %s │ %s  -  %s\n",
+					asset, cDim, cReset, cDim, cReset, cDim, cReset))
+			} else {
+				buf.WriteString(fmt.Sprintf("%-5s │  -  │  -\n", asset))
+			}
+			row++
+			continue
 		}
 
 		// Side color with icon
@@ -837,9 +873,13 @@ func (d *ResponsiveDash) renderMLSignalsContent(buf *strings.Builder, width, hei
 				sigColor, sigIcon, ml.Signal, cReset,
 			))
 		} else if width >= 45 {
+			sideText := ml.Side
+			if len(sideText) >= 2 {
+				sideText = sideText[:2]
+			}
 			buf.WriteString(fmt.Sprintf("%-5s │ %s%s%-2s%s │ %s%4.0f%%%s │ %s%s%s\n",
 				ml.Asset,
-				sideColor, sideIcon, ml.Side[:2], cReset,
+				sideColor, sideIcon, sideText, cReset,
 				probColor, prob, cReset,
 				sigColor, ml.Signal, cReset,
 			))
@@ -860,17 +900,24 @@ func (d *ResponsiveDash) renderLogContent(buf *strings.Builder, width, height in
 		return
 	}
 
-	// Show most recent logs
-	start := len(d.logs) - height
+	// Show most recent logs that fit
+	maxLines := height - 2
+	if maxLines < 1 {
+		maxLines = 1
+	}
+
+	start := len(d.logs) - maxLines
 	if start < 0 {
 		start = 0
 	}
 
 	for i := start; i < len(d.logs); i++ {
 		line := d.logs[i]
-		// Truncate safely (considering ANSI codes)
-		line = d.truncateAnsi(line, width-2)
-		buf.WriteString(line + cReset + "\n")
+		// Only truncate if really needed
+		if width > 10 {
+			line = d.truncateAnsi(line, width-2)
+		}
+		buf.WriteString(line + "\n")
 	}
 }
 
