@@ -275,9 +275,15 @@ func (s *SniperStrategy) evaluateWindow(w *polymarket.PredictionWindow) {
 	timeRemaining := time.Until(w.EndDate)
 	timeRemainingMin := timeRemaining.Minutes()
 
+	// Always update dashboard with time remaining (even if we're not in sniper window yet)
+	if s.dash != nil && timeRemaining > 0 {
+		s.dash.UpdateMarketTime(asset, timeRemaining)
+	}
+
 	// Check if we're in the sniper window (last 1-3 minutes)
 	if timeRemainingMin > s.config.MaxTimeRemainingMin {
-		// Too early, wait
+		// Too early, wait - but still update market data for display
+		s.updateMarketDataOnly(w, asset)
 		return
 	}
 	if timeRemainingMin < s.config.MinTimeRemainingMin {
@@ -325,9 +331,10 @@ func (s *SniperStrategy) evaluateWindow(w *polymarket.PredictionWindow) {
 	upOdds := w.YesPrice
 	downOdds := w.NoPrice
 
-	// Update dashboard with market data
+	// Update dashboard with market data and time remaining
 	if s.dash != nil {
 		s.dash.UpdateMarket(asset, currentPrice, priceToBeat, upOdds, downOdds)
+		s.dash.UpdateMarketTime(asset, timeRemaining)
 	}
 
 	// Find the winning side
@@ -748,4 +755,31 @@ func (s *SniperStrategy) dashUpdateStats() {
 	}
 
 	s.dash.UpdateStats(totalTrades, winningTrades, totalProfit, balance)
+}
+
+// updateMarketDataOnly updates dashboard market data without evaluating for trade
+func (s *SniperStrategy) updateMarketDataOnly(w *polymarket.PredictionWindow, asset string) {
+	if s.dash == nil {
+		return
+	}
+
+	// Get current prices
+	var priceToBeat, currentPrice decimal.Decimal
+
+	if !w.PriceToBeat.IsZero() {
+		priceToBeat = w.PriceToBeat
+	} else if s.engine != nil {
+		if state := s.engine.GetWindowState(w.ID); state != nil {
+			priceToBeat = state.StartPrice
+		}
+	}
+
+	if s.engine != nil {
+		currentPrice = s.engine.GetCurrentPrice()
+	}
+
+	// Update dashboard with market data
+	upOdds := w.YesPrice
+	downOdds := w.NoPrice
+	s.dash.UpdateMarket(asset, currentPrice, priceToBeat, upOdds, downOdds)
 }

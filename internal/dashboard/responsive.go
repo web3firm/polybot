@@ -105,6 +105,7 @@ type ResponsiveDash struct {
 	balance          decimal.Decimal
 	dayPnL           decimal.Decimal
 	lastStatsUpdate  time.Time // Throttle stats updates to every 30s
+	cachedStatsBar   string    // Cache the rendered stats bar
 
 	// Strategy info
 	strategyName string
@@ -440,9 +441,20 @@ func (d *ResponsiveDash) drawHeader(buf *strings.Builder, width int) {
 }
 
 func (d *ResponsiveDash) drawStatsBar(buf *strings.Builder, width int) {
-	// Stats bar with key metrics
+	// Stats bar with key metrics - use cached version to prevent flickering
 	buf.WriteString(cBgPanel)
 
+	// Check if we need to rebuild the cached stats bar
+	// Only rebuild every 30 seconds or if cache is empty
+	if d.cachedStatsBar == "" || time.Since(d.lastStatsUpdate) >= 30*time.Second {
+		d.rebuildStatsBar(width)
+	}
+
+	buf.WriteString(d.cachedStatsBar)
+	buf.WriteString(cReset + "\n")
+}
+
+func (d *ResponsiveDash) rebuildStatsBar(width int) {
 	// Calculate win rate
 	winRate := 0.0
 	if d.totalTrades > 0 {
@@ -479,8 +491,7 @@ func (d *ResponsiveDash) drawStatsBar(buf *strings.Builder, width int) {
 		stats += strings.Repeat(" ", width-visibleLen)
 	}
 
-	buf.WriteString(stats)
-	buf.WriteString(cReset + "\n")
+	d.cachedStatsBar = stats
 }
 
 func (d *ResponsiveDash) drawPanel(buf *strings.Builder, title string, x, y, width, height int, contentFn func(*strings.Builder, int, int)) {
@@ -1141,6 +1152,7 @@ func (d *ResponsiveDash) UpdateStats(totalTrades, winningTrades int, totalPnL, b
 	d.totalPnL = totalPnL
 	d.balance = balance
 	d.lastStatsUpdate = now
+	d.cachedStatsBar = "" // Clear cache to force rebuild
 
 	d.triggerUpdate()
 }
@@ -1164,6 +1176,7 @@ func (d *ResponsiveDash) SetDayPnL(pnl decimal.Decimal) {
 	}
 	
 	d.dayPnL = pnl
+	d.cachedStatsBar = "" // Clear cache to force rebuild
 	d.triggerUpdate()
 }
 
