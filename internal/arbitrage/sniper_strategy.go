@@ -588,16 +588,31 @@ func (s *SniperStrategy) checkPosition(pos *SniperPosition) {
 		return
 	}
 
-	// Check for stop loss (75¢)
+	// Check for stop loss - IMMEDIATE EXIT if at or below stop level
+	// Modern-day SL: exit immediately on any price <= threshold
 	if currentOdds.LessThanOrEqual(s.config.StopLoss) {
 		log.Warn().
 			Str("asset", pos.Asset).
 			Str("side", pos.Side).
 			Str("current", currentOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
 			Str("stop", s.config.StopLoss.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
-			Msg("🛑 [SNIPER] STOP LOSS HIT! Cutting losses...")
+			Msg("🛑 [SNIPER] STOP LOSS! IMMEDIATE EXIT!")
 		
 		s.exitPosition(pos, currentOdds, "STOP_LOSS")
+		return
+	}
+
+	// Quick reversal detection: if odds dropped 5¢+ from entry, consider early exit
+	dropFromEntry := pos.EntryPrice.Sub(currentOdds)
+	if dropFromEntry.GreaterThanOrEqual(decimal.NewFromFloat(0.05)) { // 5¢ drop
+		log.Warn().
+			Str("asset", pos.Asset).
+			Str("entry", pos.EntryPrice.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
+			Str("current", currentOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
+			Str("drop", dropFromEntry.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
+			Msg("⚠️ [SNIPER] REVERSAL DETECTED! Early exit to limit loss")
+		
+		s.exitPosition(pos, currentOdds, "REVERSAL")
 		return
 	}
 
