@@ -559,9 +559,9 @@ func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height
 	// Professional table header with separators
 	// Institutional-grade table with thick borders and proper columns
 	if width >= 35 {
-		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-11s ║ %-11s ║ %-4s ║ %-4s%s\n",
-			cSecondary+cBold, "Asset", "Price2Beat", "LivePrice", "UP", "DOWN", cReset))
-		buf.WriteString(cSecondary + "══════╬════════════╬════════════╬═════╬═════" + cReset + "\n")
+		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-10s ║ %-10s ║ %5s ║ %3s ║ %3s%s\n",
+			cSecondary+cBold, "Asset", "Price2Beat", "LivePrice", "Move%", "UP", "DN", cReset))
+		buf.WriteString(cSecondary + "══════╬════════════╬════════════╬═══════╬════╬════" + cReset + "\n")
 	} else if width >= 20 {
 		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-9s ║ UP  ║ DOWN%s\n",
 			cSecondary+cBold, "Asset", "Price2Beat", cReset))
@@ -600,6 +600,27 @@ func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height
 		upOdds := m.UpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64()
 		downOdds := m.DownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64()
 		
+		// Calculate price move percentage
+		var moveColor string
+		var moveSign string
+		movePct := 0.0
+		if priceToBeat > 0 {
+			movePct = ((livePrice - priceToBeat) / priceToBeat) * 100
+		}
+		if movePct > 0.05 {
+			moveColor = cSuccess + cBold
+			moveSign = "+"
+		} else if movePct < -0.05 {
+			moveColor = cDanger + cBold
+			moveSign = ""
+		} else {
+			moveColor = cDim
+			moveSign = "+"
+			if movePct < 0 {
+				moveSign = ""
+			}
+		}
+		
 		// Color odds - highlight cheap opportunities
 		upColor := cDim
 		downColor := cDim
@@ -615,10 +636,11 @@ func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height
 		}
 
 		if width >= 35 {
-			buf.WriteString(fmt.Sprintf("%-5s ║ %s$%10.2f%s ║ %s$%10.2f%s ║ %s%4.0f¢%s ║ %s%4.0f¢%s\n",
+			buf.WriteString(fmt.Sprintf("%-5s ║ %s$%9.2f%s ║ %s$%9.2f%s ║ %s%s%4.2f%%%s ║ %s%2.0f¢%s ║ %s%2.0f¢%s\n",
 				asset,
 				cDim, priceToBeat, cReset,
 				cSecondary, livePrice, cReset,
+				moveColor, moveSign, movePct, cReset,
 				upColor, upOdds, cReset,
 				downColor, downOdds, cReset,
 			))
@@ -874,8 +896,8 @@ func (d *ResponsiveDash) renderMLSignalsContent(buf *strings.Builder, width, hei
 			))
 		} else if width >= 45 {
 			sideText := ml.Side
-			if len(sideText) >= 2 {
-				sideText = sideText[:2]
+			if len(ml.Side) >= 2 {
+				sideText = ml.Side[:2]
 			}
 			buf.WriteString(fmt.Sprintf("%-5s │ %s%s%-2s%s │ %s%4.0f%%%s │ %s%s%s\n",
 				ml.Asset,
