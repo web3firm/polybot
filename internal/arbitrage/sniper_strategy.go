@@ -49,8 +49,8 @@ type SniperConfig struct {
 	StopLoss           decimal.Decimal // Cut loss at this price (e.g., 0.50)
 	HoldToResolution   bool            // Hold to resolution instead of quick flip
 
-	// Position sizing
-	PositionSizeUSD decimal.Decimal // USD per trade
+	// Position sizing (% based)
+	PositionSizePct decimal.Decimal // % of balance per trade (e.g., 0.10 = 10%)
 
 	// Safety
 	MaxTradesPerWindow int           // Max 1 trade per window
@@ -162,7 +162,7 @@ type SniperStrategy struct {
 func NewSniperStrategy(
 	scanner *polymarket.WindowScanner,
 	clobClient *CLOBClient,
-	positionSize decimal.Decimal,
+	positionSizePct decimal.Decimal,
 ) *SniperStrategy {
 	return &SniperStrategy{
 		windowScanner:    scanner,
@@ -179,7 +179,7 @@ func NewSniperStrategy(
 			MaxOddsEntry:        decimal.NewFromFloat(0.90),      // Buy at 90¢ maximum (new default)
 			QuickFlipTarget:     decimal.NewFromFloat(0.99),      // Sell at 99¢ (near resolution)
 			StopLoss:            decimal.NewFromFloat(0.50),      // Stop at 50¢ (wide SL)
-			PositionSizeUSD:     positionSize,                    // From config
+			PositionSizePct:     positionSizePct,                 // % of balance per trade
 			MaxTradesPerWindow:  1,                               // Only 1 trade per window
 			CooldownDuration:    30 * time.Second,                // 30s cooldown
 		},
@@ -524,11 +524,30 @@ func (s *SniperStrategy) executeSnipe(w *polymarket.PredictionWindow, side strin
 	// Get per-asset stop loss
 	_, _, assetStopLoss, _ := s.config.GetAssetConfig(asset)
 
-	// Calculate position size
+	// Calculate position size using % of balance
 	tickSize := decimal.NewFromFloat(0.01)
 	roundedPrice := odds.Div(tickSize).Floor().Mul(tickSize)
 
-	size := s.config.PositionSizeUSD.Div(roundedPrice).Floor().IntPart()
+	// Query current balance and use % of it
+	var positionUSD decimal.Decimal
+	if s.clobClient != nil {
+		balance, err := s.clobClient.GetBalance()
+		if err != nil {
+			log.Error().Err(err).Msg("🎯 [SNIPER] Failed to get balance")
+			return
+		}
+		positionUSD = balance.Mul(s.config.PositionSizePct) // e.g., 10% of balance
+		log.Info().
+			Str("balance", "$"+balance.StringFixed(2)).
+			Str("pct", s.config.PositionSizePct.Mul(decimal.NewFromInt(100)).StringFixed(0)+"%").
+			Str("position_usd", "$"+positionUSD.StringFixed(2)).
+			Msg("🎯 [SNIPER] Position sizing")
+	} else {
+		// Paper trading fallback
+		positionUSD = decimal.NewFromFloat(10.0)
+	}
+
+	size := positionUSD.Div(roundedPrice).Floor().IntPart()
 	if size < 1 {
 		size = 1
 	}
@@ -716,52 +735,36 @@ func (s *SniperStrategy) checkPosition(pos *SniperPosition) {
 		return
 	}
 
-	// Check for stop loss - IMMEDIATE EXIT if at or below stop level
-	// Modern-day SL: exit immediately on any price <= threshold
-	if currentOdds.LessThanOrEqual(s.config.StopLoss) {
+	// Check for stop loss - ONLY exit if at or below stop level
+	// This is the ONLY loss-exit condition. Let the price breathe above SL.
+	if currentOdds.LessThanOrEqual(pos.StopLoss) {
 		log.Warn().
 			Str("asset", pos.Asset).
 			Str("side", pos.Side).
 			Str("current", currentOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
-			Str("stop", s.config.StopLoss.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
-			Msg("🛑 [SNIPER] STOP LOSS! IMMEDIATE EXIT!")
+			Str("stop", pos.StopLoss.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
+			Msg("🛑 [SNIPER] STOP LOSS HIT! Exiting...")
 		
 		s.exitPosition(pos, currentOdds, "STOP_LOSS")
 		return
 	}
 
-	// Quick reversal detection: if odds dropped 5¢+ from entry, consider early exit
-	dropFromEntry := pos.EntryPrice.Sub(currentOdds)
-	if dropFromEntry.GreaterThanOrEqual(decimal.NewFromFloat(0.05)) { // 5¢ drop
-		log.Warn().
-			Str("asset", pos.Asset).
-			Str("entry", pos.EntryPrice.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
-			Str("current", currentOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
-			Str("drop", dropFromEntry.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
-			Msg("⚠️ [SNIPER] REVERSAL DETECTED! Early exit to limit loss")
-		
-		s.exitPosition(pos, currentOdds, "REVERSAL")
-		return
-	}
+	// NO REVERSAL EXIT! Let the price breathe.
+	// Price can drop significantly above SL without triggering exit.
+	// Only the stop loss at 50¢ (or per-asset SL) triggers an exit.
+	// Example: Entry 87¢, current 72¢ (15¢ drop) → Still above 50¢ SL → HOLD!
 
 	// Check if window is about to end (last 30 seconds)
+	// In final 30s, ALWAYS hold to resolution - can't exit fast enough anyway
+	// Let the market resolve and pay out $1 or $0
 	if time.Until(pos.WindowEnd) < 30*time.Second {
-		if s.config.HoldToResolution {
-			// Hold to resolution enabled - wait for $1 payout
-			log.Info().
-				Str("asset", pos.Asset).
-				Str("side", pos.Side).
-				Str("time_left", time.Until(pos.WindowEnd).String()).
-				Msg("🎯 [SNIPER] Holding to resolution - too late to exit")
-		} else {
-			// Quick flip mode - try to exit even in last 30 seconds
-			log.Info().
-				Str("asset", pos.Asset).
-				Str("side", pos.Side).
-				Str("current", currentOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
-				Msg("🎯 [SNIPER] Last 30s - attempting final exit...")
-			s.exitPosition(pos, currentOdds, "FINAL_EXIT")
-		}
+		log.Info().
+			Str("asset", pos.Asset).
+			Str("side", pos.Side).
+			Str("current", currentOdds.Mul(decimal.NewFromInt(100)).StringFixed(0)+"¢").
+			Str("time_left", time.Until(pos.WindowEnd).String()).
+			Msg("🎯 [SNIPER] Last 30s - HOLDING TO RESOLUTION (no early exit)")
+		// DO NOT EXIT - let it resolve at $1 or $0
 	}
 }
 

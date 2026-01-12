@@ -62,7 +62,7 @@ SignatureType    int    // 0=EOA, 1=Magic/Email, 2=Proxy
 	SwingCooldownSec    int             // Cooldown between trades
 
 	// Sniper Strategy Settings (Last Minute)
-	SniperPositionSize    decimal.Decimal // USD per sniper trade
+	SniperPositionSizePct decimal.Decimal // % of balance per trade (e.g., 0.10 = 10%)
 	SniperMinTimeMin      float64         // Min time remaining (minutes)
 	SniperMaxTimeMin      float64         // Max time remaining (minutes)
 	SniperMinPriceMove    decimal.Decimal // Min price move to confirm direction
@@ -146,7 +146,7 @@ SignatureType:    getEnvInt("SIGNATURE_TYPE", 0),
 		SwingCooldownSec:    getEnvInt("SWING_COOLDOWN_SEC", 30),
 
 		// Sniper Strategy (Last Minute) - NEW OPTIMIZED DEFAULTS
-		SniperPositionSize:    getEnvDecimal("SNIPER_POSITION_SIZE", decimal.NewFromFloat(3.50)),
+		SniperPositionSizePct: getEnvDecimal("SNIPER_POSITION_SIZE_PCT", decimal.NewFromFloat(0.10)), // 10% of balance
 		SniperMinTimeMin:      getEnvFloat("SNIPER_MIN_TIME_MIN", 1.0),
 		SniperMaxTimeMin:      getEnvFloat("SNIPER_MAX_TIME_MIN", 3.0),
 		SniperMinPriceMove:    getEnvDecimal("SNIPER_MIN_PRICE_MOVE", decimal.NewFromFloat(0.002)),

@@ -308,7 +308,7 @@ func main() {
 			sniper := arbitrage.NewSniperStrategy(
 				windowScanners[i],
 				clobClient,
-				cfg.SniperPositionSize,
+				cfg.SniperPositionSizePct,
 			)
 			// Apply config from .env
 			sniper.SetConfig(
