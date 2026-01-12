@@ -40,7 +40,7 @@ type SniperConfig struct {
 	// Entry conditions
 	MinTimeRemainingMin float64         // Minimum time left (e.g., 1 min)
 	MaxTimeRemainingMin float64         // Maximum time left (e.g., 3 min)
-	MinPriceMovePct     decimal.Decimal // Min price move to confirm direction (e.g., 0.002 = 0.2%)
+	MinPriceMovePct     decimal.Decimal // Min price move % (e.g., 0.05 = 0.05%)
 	MinOddsEntry        decimal.Decimal // Min odds to buy (e.g., 0.85)
 	MaxOddsEntry        decimal.Decimal // Max odds to buy (e.g., 0.92)
 
@@ -118,7 +118,7 @@ func NewSniperStrategy(
 		config: SniperConfig{
 			MinTimeRemainingMin: 1.0,                             // At least 1 min left
 			MaxTimeRemainingMin: 3.0,                             // Max 3 min left (last 3 minutes)
-			MinPriceMovePct:     decimal.NewFromFloat(0.002),     // 0.2% price move minimum
+			MinPriceMovePct:     decimal.NewFromFloat(0.05),       // 0.05% price move minimum
 			MinOddsEntry:        decimal.NewFromFloat(0.85),      // Buy at 85¢ minimum
 			MaxOddsEntry:        decimal.NewFromFloat(0.92),      // Buy at 92¢ maximum
 			QuickFlipTarget:     decimal.NewFromFloat(0.95),      // Sell at 95¢
@@ -157,7 +157,7 @@ func (s *SniperStrategy) SetConfig(
 	
 	s.config.MinTimeRemainingMin = minTimeMin
 	s.config.MaxTimeRemainingMin = maxTimeMin
-	s.config.MinPriceMovePct = minPriceMove
+	s.config.MinPriceMovePct = minPriceMove.Div(decimal.NewFromInt(100)) // Convert 0.05 -> 0.0005
 	s.config.MinOddsEntry = minOdds
 	s.config.MaxOddsEntry = maxOdds
 	s.config.QuickFlipTarget = target
@@ -312,9 +312,9 @@ func (s *SniperStrategy) evaluateWindow(w *polymarket.PredictionWindow) {
 	if priceMovePct.LessThan(s.config.MinPriceMovePct) {
 		log.Debug().
 			Str("asset", asset).
-			Str("move_pct", priceMovePct.Mul(decimal.NewFromInt(100)).StringFixed(3)+"%").
-			Str("required", s.config.MinPriceMovePct.Mul(decimal.NewFromInt(100)).StringFixed(2)+"%").
-			Msg("🎯 [SNIPER] Price move too small - waiting")
+			Str("move", priceMovePct.Mul(decimal.NewFromInt(100)).StringFixed(3)+"%").
+			Str("need", s.config.MinPriceMovePct.Mul(decimal.NewFromInt(100)).StringFixed(2)+"%").
+			Msg("🎯 [SNIPER] Price move too small")
 		return
 	}
 

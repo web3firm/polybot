@@ -483,16 +483,16 @@ func (e *Engine) logStatus() {
 	
 	// Use CMC price for this asset (fastest, same source as Data Streams!)
 	var currentPrice decimal.Decimal
-	var priceSource string
+	var priceSource string = "CMC"
 	
 	if e.cmcClient != nil && !e.cmcClient.IsAssetStale(asset) {
 		currentPrice = e.cmcClient.GetAssetPrice(asset)
-		priceSource = "CMC"
 	}
 	if currentPrice.IsZero() && e.chainlinkClient != nil && asset == "BTC" {
 		currentPrice = e.chainlinkClient.GetCurrentPrice()
 		priceSource = "CL"
 	}
+	_ = priceSource // Used in detailed log
 	if currentPrice.IsZero() && asset == "BTC" {
 		currentPrice = e.binanceClient.GetCurrentPrice()
 		priceSource = "BN"
@@ -531,15 +531,16 @@ func (e *Engine) logStatus() {
 			status = "🚀 READY!"
 		}
 
-		// Clean, compact log format
-		log.Info().
-			Str("asset", asset).
-			Str("price", currentPrice.StringFixed(2)).
-			Str("move", fmt.Sprintf("%s%.2f%%", direction[:1], absChangePct.InexactFloat64())).
-			Str("odds", fmt.Sprintf("%.0f/%.0f", state.CurrentUpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(), state.CurrentDownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64())).
-			Str("src", priceSource).
-			Str("status", status).
-			Msg("📊 " + asset)
+		// Full detailed log for dashboard
+		log.Info().Msg(fmt.Sprintf("📊 %s $%.2f %s%.2f%% UP:%0.f¢ DN:%.0f¢ %s",
+			asset,
+			currentPrice.InexactFloat64(),
+			direction[:1],
+			absChangePct.InexactFloat64(),
+			state.CurrentUpOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+			state.CurrentDownOdds.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+			status,
+		))
 	}
 }
 

@@ -260,18 +260,24 @@ func (c *WSClient) handleDisconnect() {
 	c.isConnected = false
 	c.mu.Unlock()
 	
-	log.Warn().Msg("WebSocket disconnected, reconnecting in 5s...")
+	log.Warn().Msg("⚠️ WebSocket disconnected, reconnecting in 1s...")
 	
-	time.Sleep(5 * time.Second)
+	time.Sleep(1 * time.Second) // Faster reconnect
 	
-	if err := c.Connect(); err != nil {
-		log.Error().Err(err).Msg("Reconnect failed")
-	} else {
-		// Re-subscribe to all markets
-		c.mu.Lock()
-		c.subscribed = make(map[string]bool)
-		c.mu.Unlock()
+	for retries := 0; retries < 5; retries++ {
+		if err := c.Connect(); err != nil {
+			log.Error().Err(err).Int("retry", retries+1).Msg("Reconnect failed, retrying...")
+			time.Sleep(time.Duration(retries+1) * time.Second) // Exponential backoff
+		} else {
+			log.Info().Msg("✅ WebSocket reconnected successfully")
+			// Re-subscribe to all markets
+			c.mu.Lock()
+			c.subscribed = make(map[string]bool)
+			c.mu.Unlock()
+			return
+		}
 	}
+	log.Error().Msg("❌ Failed to reconnect after 5 attempts")
 }
 
 // Close closes the WebSocket connection

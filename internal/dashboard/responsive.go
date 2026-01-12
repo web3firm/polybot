@@ -112,14 +112,15 @@ type ResponsiveDash struct {
 
 // RMarketData holds market information
 type RMarketData struct {
-	Asset       string
-	LivePrice   decimal.Decimal
-	PriceToBeat decimal.Decimal
-	UpOdds      decimal.Decimal
-	DownOdds    decimal.Decimal
-	Spread      decimal.Decimal
-	Volume24h   decimal.Decimal
-	UpdatedAt   time.Time
+	Asset         string
+	LivePrice     decimal.Decimal
+	PriceToBeat   decimal.Decimal
+	UpOdds        decimal.Decimal
+	DownOdds      decimal.Decimal
+	Spread        decimal.Decimal
+	Volume24h     decimal.Decimal
+	TimeRemaining time.Duration // Time until window ends
+	UpdatedAt     time.Time
 }
 
 // RPositionData holds position information
@@ -558,14 +559,14 @@ func (d *ResponsiveDash) drawStatusBar(buf *strings.Builder, width, height int) 
 func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height int) {
 	// Professional table header with separators
 	// Institutional-grade table with thick borders and proper columns
-	if width >= 35 {
-		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-10s ║ %-10s ║ %5s ║ %3s ║ %3s%s\n",
-			cSecondary+cBold, "Asset", "Price2Beat", "LivePrice", "Move%", "UP", "DN", cReset))
-		buf.WriteString(cSecondary + "══════╬════════════╬════════════╬═══════╬════╬════" + cReset + "\n")
-	} else if width >= 20 {
-		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-9s ║ UP  ║ DOWN%s\n",
-			cSecondary+cBold, "Asset", "Price2Beat", cReset))
-		buf.WriteString(cSecondary + "══════╬══════════╬═════╬═════" + cReset + "\n")
+	if width >= 50 {
+		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-10s ║ %-10s ║ %5s ║ %3s ║ %3s ║ %5s%s\n",
+			cSecondary+cBold, "Asset", "Price2Beat", "LivePrice", "Move%", "UP", "DN", "Time", cReset))
+		buf.WriteString(cSecondary + "══════╬════════════╬════════════╬═══════╬════╬════╬══════" + cReset + "\n")
+	} else if width >= 35 {
+		buf.WriteString(fmt.Sprintf("%s%-5s ║ %-10s ║ %5s ║ %3s ║ %3s%s\n",
+			cSecondary+cBold, "Asset", "LivePrice", "Move%", "UP", "DN", cReset))
+		buf.WriteString(cSecondary + "══════╬════════════╬═══════╬════╬════" + cReset + "\n")
 	} else {
 		buf.WriteString(fmt.Sprintf("%sAsset ║ UP ║ DN%s\n", cSecondary+cBold, cReset))
 		buf.WriteString(cSecondary + "══════╬════╬════" + cReset + "\n")
@@ -635,19 +636,39 @@ func (d *ResponsiveDash) renderMarketContent(buf *strings.Builder, width, height
 			downColor = cDanger
 		}
 
-		if width >= 35 {
-			buf.WriteString(fmt.Sprintf("%-5s ║ %s$%9.2f%s ║ %s$%9.2f%s ║ %s%s%4.2f%%%s ║ %s%2.0f¢%s ║ %s%2.0f¢%s\n",
+		// Format time remaining
+		timeStr := "--"
+		timeColor := cDim
+		if m.TimeRemaining > 0 {
+			mins := int(m.TimeRemaining.Minutes())
+			if mins < 5 {
+				timeColor = cDanger + cBold // Last 5 min = HOT
+				timeStr = fmt.Sprintf("%dm", mins)
+			} else if mins < 30 {
+				timeColor = cWarning
+				timeStr = fmt.Sprintf("%dm", mins)
+			} else if mins < 60 {
+				timeStr = fmt.Sprintf("%dm", mins)
+			} else {
+				timeStr = fmt.Sprintf("%dh", mins/60)
+			}
+		}
+
+		if width >= 50 {
+			buf.WriteString(fmt.Sprintf("%-5s ║ %s$%9.2f%s ║ %s$%9.2f%s ║ %s%s%4.2f%%%s ║ %s%2.0f¢%s ║ %s%2.0f¢%s ║ %s%5s%s\n",
 				asset,
 				cDim, priceToBeat, cReset,
 				cSecondary, livePrice, cReset,
 				moveColor, moveSign, movePct, cReset,
 				upColor, upOdds, cReset,
 				downColor, downOdds, cReset,
+				timeColor, timeStr, cReset,
 			))
-		} else if width >= 20 {
-			buf.WriteString(fmt.Sprintf("%-6s ║ $%-9.2f ║ %s%3.0f¢%s ║ %s%3.0f¢%s\n",
+		} else if width >= 35 {
+			buf.WriteString(fmt.Sprintf("%-5s ║ %s$%9.2f%s ║ %s%s%4.2f%%%s ║ %s%2.0f¢%s ║ %s%2.0f¢%s\n",
 				asset,
-				priceToBeat,
+				cSecondary, livePrice, cReset,
+				moveColor, moveSign, movePct, cReset,
 				upColor, upOdds, cReset,
 				downColor, downOdds, cReset,
 			))
@@ -988,17 +1009,34 @@ func (d *ResponsiveDash) UpdateMarket(asset string, livePrice, priceToBeat, upOd
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// Preserve existing TimeRemaining if set
+	var timeRemaining time.Duration
+	if existing, ok := d.markets[asset]; ok {
+		timeRemaining = existing.TimeRemaining
+	}
+
 	d.markets[asset] = &RMarketData{
-		Asset:       asset,
-		LivePrice:   livePrice,
-		PriceToBeat: priceToBeat,
-		UpOdds:      upOdds,
-		DownOdds:    downOdds,
-		Spread:      upOdds.Add(downOdds).Sub(decimal.NewFromInt(1)).Abs(),
-		UpdatedAt:   time.Now(),
+		Asset:         asset,
+		LivePrice:     livePrice,
+		PriceToBeat:   priceToBeat,
+		UpOdds:        upOdds,
+		DownOdds:      downOdds,
+		Spread:        upOdds.Add(downOdds).Sub(decimal.NewFromInt(1)).Abs(),
+		TimeRemaining: timeRemaining,
+		UpdatedAt:     time.Now(),
 	}
 
 	d.triggerUpdate()
+}
+
+// UpdateMarketTime updates time remaining for a market
+func (d *ResponsiveDash) UpdateMarketTime(asset string, timeRemaining time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if m, ok := d.markets[asset]; ok {
+		m.TimeRemaining = timeRemaining
+	}
 }
 
 // UpdatePosition updates or adds a position
