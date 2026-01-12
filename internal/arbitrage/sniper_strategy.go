@@ -219,7 +219,7 @@ func (s *SniperStrategy) Stop() {
 
 // mainLoop is the main scanning loop
 func (s *SniperStrategy) mainLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond) // Check every 500ms
+	ticker := time.NewTicker(200 * time.Millisecond) // Fast scanning for opportunities
 	defer ticker.Stop()
 
 	for {
@@ -497,7 +497,7 @@ func (s *SniperStrategy) recordPosition(pos *SniperPosition) {
 
 // positionMonitorLoop monitors positions for exit signals
 func (s *SniperStrategy) positionMonitorLoop() {
-	ticker := time.NewTicker(200 * time.Millisecond) // Check every 200ms
+	ticker := time.NewTicker(100 * time.Millisecond) // Fast position monitoring for quick SL
 	defer ticker.Stop()
 
 	for {

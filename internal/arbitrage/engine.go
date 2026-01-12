@@ -546,7 +546,7 @@ func (e *Engine) logStatus() {
 
 // windowStateLoop updates window states every 30 seconds
 func (e *Engine) windowStateLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(2 * time.Second) // Faster window state updates
 	defer ticker.Stop()
 
 	// Initial update
@@ -564,7 +564,7 @@ func (e *Engine) windowStateLoop() {
 
 // oddsRefreshLoop refreshes odds every 2 seconds
 func (e *Engine) oddsRefreshLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(200 * time.Millisecond) // Fast odds refresh
 	defer ticker.Stop()
 
 	for {

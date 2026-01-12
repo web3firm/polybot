@@ -82,7 +82,7 @@ func (c *Client) Start() {
 
 	// Poll every 1 second for fast updates
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond) // Fast price updates
 		defer ticker.Stop()
 
 		for {
