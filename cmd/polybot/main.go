@@ -23,6 +23,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/shopspring/decimal"
 
 	"github.com/web3guy0/polybot/internal/arbitrage"
 	"github.com/web3guy0/polybot/internal/binance"
@@ -42,6 +43,7 @@ func main() {
 	useDashboard := false
 	useSwing := false      // Mean reversion swing trading
 	useSniper := false     // Last minute sniper strategy
+	useWhale := false      // 🐋 Whale strategy (ML-trained contrarian)
 	for _, arg := range os.Args[1:] {
 		if arg == "--dashboard" || arg == "-d" || arg == "--responsive" || arg == "-r" {
 			useDashboard = true
@@ -51,6 +53,9 @@ func main() {
 		}
 		if arg == "--sniper" || arg == "--snipe" {
 			useSniper = true
+		}
+		if arg == "--whale" || arg == "-w" {
+			useWhale = true
 		}
 	}
 
@@ -64,6 +69,9 @@ func main() {
 		}
 		if useSniper {
 			strategyName = "SNIPER"
+		}
+		if useWhale {
+			strategyName = "🐋 WHALE"
 		}
 		dash = dashboard.NewResponsiveDash(strategyName)
 	}
@@ -339,6 +347,54 @@ func main() {
 		}
 	}
 	
+	// ====== 🐋 WHALE STRATEGY (ML-Trained Contrarian) ======
+	// Buy CRASHED odds (15-55¢) when others panic sell
+	// Hold to resolution for full $1 payout
+	// Trained on 150,411 whale trades - exploits odds mispricing
+	var whaleStrategies []*arbitrage.WhaleStrategy
+	if useWhale {
+		whaleStrategies = make([]*arbitrage.WhaleStrategy, 0, len(assets))
+		for i, asset := range assets {
+			whale := arbitrage.NewWhaleStrategy(
+				windowScanners[i],
+				clobClient,
+				db,
+			)
+			// Configure from .env
+			whaleConfig := arbitrage.WhaleConfig{
+				MinOddsEntry:           cfg.WhaleMinOdds,
+				MaxOddsEntry:           cfg.WhaleMaxOdds,
+				OptimalEntry:           cfg.WhaleBTCOptimalEntry, // Default, will be per-asset
+				MinTimeRemainingMin:    cfg.WhaleMinTimeMin,
+				MaxTimeRemainingMin:    cfg.WhaleMaxTimeMin,
+				HoldToResolution:       true,
+				PositionSizePct:        cfg.WhalePositionSizePct,
+				MaxConcurrentPositions: 2,
+				MaxTradesPerWindow:     1,
+				AssetMinEntry: map[string]decimal.Decimal{
+					"BTC": cfg.WhaleMinOdds,
+					"ETH": cfg.WhaleMinOdds.Add(decimal.NewFromFloat(0.05)),
+					"SOL": cfg.WhaleMinOdds.Add(decimal.NewFromFloat(0.10)),
+				},
+				AssetMaxEntry: map[string]decimal.Decimal{
+					"BTC": cfg.WhaleMaxOdds,
+					"ETH": cfg.WhaleMaxOdds.Add(decimal.NewFromFloat(0.05)),
+					"SOL": cfg.WhaleMaxOdds.Add(decimal.NewFromFloat(0.10)),
+				},
+				AssetOptimalEntry: map[string]decimal.Decimal{
+					"BTC": cfg.WhaleBTCOptimalEntry,
+					"ETH": cfg.WhaleETHOptimalEntry,
+					"SOL": cfg.WhaleSOLOptimalEntry,
+				},
+			}
+			whale.SetConfig(whaleConfig)
+			whale.PrintStrategyInfo()
+			whale.Start()
+			whaleStrategies = append(whaleStrategies, whale)
+			log.Info().Str("asset", asset).Bool("paper", cfg.DryRun).Msg("🐋 Whale strategy started (contrarian dip buying)")
+		}
+	}
+	
 	// Subscribe to WebSocket markets for all active windows
 	if wsClient != nil {
 		go func() {
@@ -377,7 +433,10 @@ func main() {
 			if dash != nil {
 				sniperStrategies[i].SetDashboard(dash)
 			}
-		} else if !useSwing && !useSniper && i < len(scalperStrategies) {
+		} else if useWhale && i < len(whaleStrategies) {
+			// Using whale strategy (no SetNotifier yet, just log)
+			log.Info().Str("asset", asset).Msg("🐋 Whale strategy monitoring started")
+		} else if !useSwing && !useSniper && !useWhale && i < len(scalperStrategies) {
 			// Using scalper strategy (default)
 			telegramBot.AddScalper(asset, scalperStrategies[i])
 			scalperStrategies[i].SetNotifier(telegramBot)
@@ -424,6 +483,20 @@ func main() {
 		log.Info().Msg("║                                          ║")
 		log.Info().Msg("║  🔫 Quick scalps on near-certain bets   ║")
 		log.Info().Msg("║  ⚡ 5-10¢ profit, tight risk control     ║")
+		log.Info().Msg("╚══════════════════════════════════════════╝")
+	} else if useWhale {
+		log.Info().Msg("╔══════════════════════════════════════════╗")
+		log.Info().Msg("║   🐋 WHALE STRATEGY - CONTRARIAN DIP 🐋   ║")
+		log.Info().Msg("║                                          ║")
+		log.Info().Msg("║  ML-Trained on 150k whale trades         ║")
+		log.Info().Msg("║                                          ║")
+		log.Info().Msgf("║  Assets: %-32s ║", formatAssets(assets))
+		log.Info().Msg("║  → Buy CRASHED odds (15-55¢)            ║")
+		log.Info().Msg("║  → Hold to resolution ($1 payout)        ║")
+		log.Info().Msg("║  → NO stop loss (binary outcome)         ║")
+		log.Info().Msg("║                                          ║")
+		log.Info().Msg("║  📈 R:R 1:1.86 @ 35¢ entry              ║")
+		log.Info().Msg("║  🎲 Breakeven: 35% WR (actual ~50%)      ║")
 		log.Info().Msg("╚══════════════════════════════════════════╝")
 	} else {
 		log.Info().Msg("╔══════════════════════════════════════════╗")

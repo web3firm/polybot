@@ -270,6 +270,72 @@ func NewWhaleStrategy(
 	}
 }
 
+// Start begins the whale strategy monitoring
+func (ws *WhaleStrategy) Start() {
+	go ws.mainLoop()
+	log.Info().
+		Str("min_entry", ws.config.MinOddsEntry.String()).
+		Str("max_entry", ws.config.MaxOddsEntry.String()).
+		Msg("🐋 Whale strategy started - hunting for crashed odds")
+}
+
+// mainLoop monitors for whale entry opportunities
+func (ws *WhaleStrategy) mainLoop() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ws.scanForCrashedOdds()
+	}
+}
+
+// scanForCrashedOdds looks for odds that have crashed into our buy zone
+func (ws *WhaleStrategy) scanForCrashedOdds() {
+	if ws.windowScanner == nil {
+		return
+	}
+
+	windows := ws.windowScanner.GetActiveWindows()
+	
+	for i := range windows {
+		window := &windows[i]
+		
+		// Update price history for both sides
+		ws.updatePriceHistory(window.ID, "UP", window.YesPrice)
+		ws.updatePriceHistory(window.ID, "DOWN", window.NoPrice)
+		
+		// Check for entry signal
+		signal, err := ws.CheckEntry(window)
+		if err != nil {
+			continue
+		}
+		
+		if signal != nil && signal.Strength.GreaterThanOrEqual(decimal.NewFromFloat(50)) {
+			// Calculate position size (15% of assumed $5 bankroll for safety)
+			positionSize := decimal.NewFromFloat(0.75) // Conservative $0.75 per trade
+			
+			log.Info().
+				Str("asset", window.Asset).
+				Str("side", signal.Side).
+				Str("odds", signal.CurrentOdds.String()).
+				Str("rr", fmt.Sprintf("1:%.2f", signal.ExpectedRR.InexactFloat64())).
+				Str("strength", signal.Strength.String()).
+				Str("reason", signal.Reason).
+				Msg("🐋 WHALE SIGNAL DETECTED!")
+			
+			// Execute trade if CLOB client available
+			if ws.clobClient != nil {
+				_, err := ws.ExecuteTrade(signal, positionSize)
+				if err != nil {
+					log.Error().Err(err).Msg("🐋 Failed to execute whale trade")
+				}
+			} else {
+				log.Warn().Msg("🐋 No CLOB client - would have traded")
+			}
+		}
+	}
+}
+
 // SetConfig updates the whale strategy configuration
 func (ws *WhaleStrategy) SetConfig(config WhaleConfig) {
 	ws.mu.Lock()
