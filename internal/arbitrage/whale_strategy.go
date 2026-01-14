@@ -844,8 +844,9 @@ func (ws *WhaleStrategy) ExecuteTrade(signal *WhaleSignal, positionSize decimal.
 			Str("order_id", orderID).
 			Msg("📝 [WHALE] Paper BUY recorded")
 	} else {
-		// LIVE TRADE - execute real order
-		order, err := ws.clobClient.PlaceMarketBuy(tokenID, positionSize)
+		// LIVE TRADE - execute real order at the current entry odds
+		// IMPORTANT: Pass the actual entry price to avoid fetching wrong price
+		order, err := ws.clobClient.PlaceMarketBuyAtPrice(tokenID, positionSize, signal.CurrentOdds)
 		if err != nil {
 			return nil, fmt.Errorf("failed to place whale order: %w", err)
 		}
