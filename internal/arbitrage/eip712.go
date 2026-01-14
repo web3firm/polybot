@@ -8,11 +8,12 @@ package arbitrage
 import (
 	"crypto/ecdsa"
 	"fmt"
+	"math"
 	"math/big"
 	"math/rand"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/math"
+	ethmath "github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"github.com/shopspring/decimal"
@@ -217,7 +218,7 @@ func (s *OrderSigner) buildTypedData(order *CTFOrder) apitypes.TypedData {
 		Domain: apitypes.TypedDataDomain{
 			Name:              "Polymarket CTF Exchange",
 			Version:           "1",
-			ChainId:           math.NewHexOrDecimal256(s.chainID),
+			ChainId:           ethmath.NewHexOrDecimal256(s.chainID),
 			VerifyingContract: s.exchangeAddr.Hex(),
 		},
 		Message: apitypes.TypedDataMessage{
@@ -246,29 +247,27 @@ func toTokenDecimals(amount float64) *big.Int {
 	return big.NewInt(int64(scaled))
 }
 
-// toMakerAmount converts USDC amount with max 2 decimal precision
-// Polymarket requires makerAmount to have max 2 decimals (cents)
-// IMPORTANT: Do NOT round up - truncate to avoid "invalid amounts" error
-// For BUY orders: makerAmount (USDC) must be 2 decimals, takerAmount (shares) can be 4
-// For SELL orders: makerAmount (shares) can be more precise
+// toMakerAmount converts amount with max 2 decimal precision
+// Polymarket requires makerAmount to have max 2 decimals
+// For BUY orders: makerAmount = USDC we spend
+// For SELL orders: makerAmount = shares we sell (MUST be 2 decimals!)
 func toMakerAmount(amount float64) *big.Int {
-	// BUY makerAmount = USDC = max 2 decimals
-	// Truncate to 2 decimals then scale to 6 decimal token units
-	// e.g., 2.2345 -> 2.23 -> 2230000
-	truncated := float64(int64(amount*100)) / 100 // Truncate to 2 decimals
-	scaled := truncated * 1e6
-	return big.NewInt(int64(scaled))
+	// Round to nearest 2 decimals, then truncate for safety
+	// e.g., 2.5316 -> 2.53 -> 2530000 (in 6-decimal units)
+	rounded := math.Round(amount*100) / 100 // Round to 2 decimals
+	scaled := rounded * 1e6
+	return big.NewInt(int64(math.Round(scaled))) // Round final to avoid float issues
 }
 
-// toTakerAmount converts share amount with max 4 decimal precision for BUY orders
-// For BUY: takerAmount (shares) can have up to 4 decimals
-// e.g., 7.1234 shares -> 7123400 (in 6-decimal token units)
+// toTakerAmount converts amount with max 4 decimal precision
+// For BUY: takerAmount = shares we receive
+// For SELL: takerAmount = USDC we receive
 func toTakerAmount(amount float64) *big.Int {
-	// Truncate to 4 decimals then scale to 6 decimal token units
-	// e.g., 22.22225 -> 22.2222 -> 22222200
-	truncated := float64(int64(amount*10000)) / 10000 // Truncate to 4 decimals
-	scaled := truncated * 1e6
-	return big.NewInt(int64(scaled))
+	// Round to 4 decimals
+	// e.g., 22.22225 -> 22.2223 -> 22222300 (in 6-decimal units)
+	rounded := math.Round(amount*10000) / 10000 // Round to 4 decimals
+	scaled := rounded * 1e6
+	return big.NewInt(int64(math.Round(scaled))) // Round final to avoid float issues
 }
 
 // generateSalt generates a random salt (matching Python py-clob-client format)
