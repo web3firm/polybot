@@ -411,7 +411,8 @@ func (c *CLOBClient) PlaceMarketSellAtPrice(tokenID string, size decimal.Decimal
 
 // placeOrder places an order using native Go EIP-712 signing (fast!)
 // If marketPrice is provided (non-zero), skip the odds fetch for speed
-func (c *CLOBClient) placeOrder(tokenID string, side int, size decimal.Decimal, marketPrice decimal.Decimal) (*OrderResponse, error) {
+// NOTE: size is in DOLLARS for market orders, will be converted to shares
+func (c *CLOBClient) placeOrder(tokenID string, side int, sizeInDollars decimal.Decimal, marketPrice decimal.Decimal) (*OrderResponse, error) {
 	start := time.Now()
 
 	var price decimal.Decimal
@@ -459,6 +460,20 @@ func (c *CLOBClient) placeOrder(tokenID string, side int, size decimal.Decimal, 
 	// Create order signer
 	signer := NewOrderSigner(c.privateKey, c.address, c.funderAddress, c.signatureType)
 
+	// Convert dollar amount to shares: shares = dollars / price
+	// For a $1 order at 44¢, that's 1 / 0.44 = 2.27 shares
+	size := sizeInDollars.Div(price)
+	
+	// Polymarket minimum is 5 shares for limit orders
+	// For FOK orders we can go lower but let's ensure at least $1 worth
+	minShares := decimal.NewFromInt(5)
+	if size.LessThan(minShares) {
+		size = minShares
+	}
+	
+	// Round to reasonable precision (avoid dust)
+	size = size.Round(2)
+
 	// Create and sign order
 	signedOrder, err := signer.CreateSignedOrder(tokenID, side, price, size)
 	if err != nil {
@@ -476,7 +491,8 @@ func (c *CLOBClient) placeOrder(tokenID string, side int, size decimal.Decimal, 
 	log.Info().
 		Str("token", tokenID[:20]+"...").
 		Str("side", sideStr).
-		Str("size", size.String()).
+		Str("dollars", sizeInDollars.String()).
+		Str("shares", size.String()).
 		Str("price", price.String()).
 		Dur("sign_time_ms", signTime).
 		Msg("⚡ Order signed (native Go)")
@@ -536,7 +552,14 @@ func (c *CLOBClient) submitSignedOrderWithType(signedOrder *SignedCTFOrder, orde
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return &orderResp, fmt.Errorf("order failed: %s - %s", orderResp.ErrorCode, orderResp.Message)
+		// Log full response for debugging
+		log.Error().
+			Int("status", resp.StatusCode).
+			Str("error_code", orderResp.ErrorCode).
+			Str("message", orderResp.Message).
+			Str("raw_body", string(respBody)).
+			Msg("❌ CLOB API order rejected")
+		return &orderResp, fmt.Errorf("order failed (HTTP %d): %s - %s | raw: %s", resp.StatusCode, orderResp.ErrorCode, orderResp.Message, string(respBody))
 	}
 
 	log.Info().
