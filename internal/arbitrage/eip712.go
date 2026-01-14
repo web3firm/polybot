@@ -107,9 +107,9 @@ func (s *OrderSigner) CreateOrder(tokenID string, side int, price, size decimal.
 		takerAmount = toTakerAmount(sizeFloat)
 	} else {
 		// Selling: we give shares (maker), receive USDC (taker)
-		// makerAmount = size (shares we sell) - shares can have 4 decimals as maker
-		// takerAmount = size * price (USDC we receive) - max 4 decimals
-		makerAmount = toTakerAmount(sizeFloat) // shares as maker
+		// CRITICAL: For SELL orders, makerAmount (shares) = max 2 decimals!
+		// takerAmount (USDC we receive) = max 4 decimals
+		makerAmount = toMakerAmount(sizeFloat) // shares with 2 decimal max
 		usdcAmount := sizeFloat * priceFloat
 		takerAmount = toTakerAmount(usdcAmount)
 	}
