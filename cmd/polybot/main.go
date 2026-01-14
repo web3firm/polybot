@@ -369,7 +369,13 @@ func main() {
 				OptimalEntry:           cfg.WhaleBTCOptimalEntry, // Default, will be per-asset
 				MinTimeRemainingMin:    cfg.WhaleMinTimeMin,
 				MaxTimeRemainingMin:    cfg.WhaleMaxTimeMin,
-				HoldToResolution:       true,
+				// 🎯 EXIT CONDITIONS (PROFIT TAKING)
+				TakeProfitPct:          cfg.WhaleTakeProfitPct,
+				StopLossPct:            cfg.WhaleStopLossPct,
+				TrailingStopPct:        cfg.WhaleTrailingStopPct,
+				TimeExitMinutes:        cfg.WhaleTimeExitMin,
+				MinProfitToExit:        decimal.NewFromFloat(0.02), // Min 2¢ profit
+				HoldToResolution:       cfg.WhaleHoldToResolution,
 				PositionSizePct:        cfg.WhalePositionSizePct,
 				MaxConcurrentPositions: 2,
 				MaxTradesPerWindow:     1,

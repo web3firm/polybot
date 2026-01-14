@@ -64,8 +64,15 @@ type WhaleConfig struct {
 	// Drop detection (look for crashes)
 	MinOddsDrop         decimal.Decimal // Min drop from high (e.g., 0.15 = 15¢ drop)
 	
-	// Exit conditions (HOLD TO RESOLUTION - no quick flip)
-	HoldToResolution    bool            // Always true for whale strategy
+	// 🎯 EXIT CONDITIONS (PROFIT TAKING)
+	TakeProfitPct       decimal.Decimal // Take profit at +X% (e.g., 0.15 = +15%)
+	StopLossPct         decimal.Decimal // Stop loss at -X% (e.g., 0.25 = -25%)
+	TrailingStopPct     decimal.Decimal // Trailing stop % from high (e.g., 0.10 = 10%)
+	TimeExitMinutes     float64         // Exit X minutes before resolution (e.g., 1.0)
+	MinProfitToExit     decimal.Decimal // Min profit to exit early (e.g., 0.03 = 3¢)
+	
+	// Exit mode
+	HoldToResolution    bool            // If true, ignore TP/SL and hold to end
 	
 	// Position sizing
 	PositionSizePct     decimal.Decimal // % of balance per trade (e.g., 0.15 = 15%)
@@ -96,8 +103,15 @@ func DefaultWhaleConfig() WhaleConfig {
 		// Crash detection
 		MinOddsDrop:      decimal.NewFromFloat(0.10), // 10¢ drop triggers interest
 		
-		// Always hold to resolution
-		HoldToResolution: true,
+		// 🎯 EXIT CONDITIONS (TAKE PROFITS!)
+		TakeProfitPct:    decimal.NewFromFloat(0.20), // +20% take profit (35¢→42¢)
+		StopLossPct:      decimal.NewFromFloat(0.30), // -30% stop loss (35¢→24.5¢)
+		TrailingStopPct:  decimal.NewFromFloat(0.15), // 15% trailing from high
+		TimeExitMinutes:  0.5,                        // Exit 30 sec before resolution
+		MinProfitToExit:  decimal.NewFromFloat(0.02), // Min 2¢ profit to exit
+		
+		// Exit mode - FALSE = take profits actively
+		HoldToResolution: false,
 		
 		// Position sizing
 		PositionSizePct: decimal.NewFromFloat(0.15), // 15% per trade (fewer, larger)
@@ -179,13 +193,18 @@ type WhalePosition struct {
 	ConditionID   string
 	WindowID      string
 	EntryPrice    decimal.Decimal
+	CurrentPrice  decimal.Decimal // Latest price
+	HighPrice     decimal.Decimal // Highest price since entry (for trailing stop)
 	Size          decimal.Decimal // Shares owned
 	EntryTime     time.Time
 	WindowEnd     time.Time
 	OddsDropPct   decimal.Decimal // How much odds dropped before entry
 	ExpectedRR    decimal.Decimal // R:R at entry
 	BreakevenWR   decimal.Decimal // Win rate needed
-	Status        string          // "holding", "resolved_win", "resolved_loss"
+	Status        string          // "holding", "exited_tp", "exited_sl", "exited_time", "resolved_win", "resolved_loss"
+	ExitPrice     decimal.Decimal // Price we exited at
+	ExitReason    string          // Why we exited
+	PnL           decimal.Decimal // Realized P&L
 }
 
 // PriceHistory tracks historical odds for crash detection
@@ -283,9 +302,13 @@ func NewWhaleStrategy(
 // Start begins the whale strategy monitoring
 func (ws *WhaleStrategy) Start() {
 	go ws.mainLoop()
+	go ws.exitMonitorLoop() // 🎯 Monitor positions for exit conditions
 	log.Info().
 		Str("min_entry", ws.config.MinOddsEntry.String()).
 		Str("max_entry", ws.config.MaxOddsEntry.String()).
+		Str("take_profit", fmt.Sprintf("+%.0f%%", ws.config.TakeProfitPct.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+		Str("stop_loss", fmt.Sprintf("-%.0f%%", ws.config.StopLossPct.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+		Bool("hold_to_resolution", ws.config.HoldToResolution).
 		Msg("🐋 Whale strategy started - hunting for crashed odds")
 }
 
@@ -297,6 +320,207 @@ func (ws *WhaleStrategy) mainLoop() {
 	for range ticker.C {
 		ws.scanForCrashedOdds()
 	}
+}
+
+// exitMonitorLoop monitors open positions for exit conditions
+func (ws *WhaleStrategy) exitMonitorLoop() {
+	ticker := time.NewTicker(250 * time.Millisecond) // Check exits fast
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ws.checkExitConditions()
+	}
+}
+
+// checkExitConditions evaluates all open positions for exit signals
+func (ws *WhaleStrategy) checkExitConditions() {
+	if ws.config.HoldToResolution {
+		return // Skip exit checks if holding to resolution
+	}
+
+	if ws.windowScanner == nil {
+		return
+	}
+
+	windows := ws.windowScanner.GetActiveWindows()
+	windowMap := make(map[string]*polymarket.PredictionWindow)
+	for i := range windows {
+		windowMap[windows[i].ID] = &windows[i]
+	}
+
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	for windowID, position := range ws.positions {
+		if position.Status != "holding" {
+			continue
+		}
+
+		window, exists := windowMap[windowID]
+		if !exists {
+			continue
+		}
+
+		// Get current price for our side
+		var currentPrice decimal.Decimal
+		if position.Side == "UP" {
+			currentPrice = window.YesPrice
+		} else {
+			currentPrice = window.NoPrice
+		}
+
+		// Update position tracking
+		position.CurrentPrice = currentPrice
+		if currentPrice.GreaterThan(position.HighPrice) {
+			position.HighPrice = currentPrice
+		}
+
+		// Calculate P&L percentage
+		pnlPct := currentPrice.Sub(position.EntryPrice).Div(position.EntryPrice)
+		pnlAbs := currentPrice.Sub(position.EntryPrice).Mul(position.Size)
+
+		// Time until resolution
+		timeLeft := time.Until(position.WindowEnd).Minutes()
+
+		// 🎯 CHECK EXIT CONDITIONS
+
+		// 1. TAKE PROFIT - Price rose enough
+		if pnlPct.GreaterThanOrEqual(ws.config.TakeProfitPct) {
+			ws.executeExit(position, currentPrice, "take_profit", 
+				fmt.Sprintf("🎯 TAKE PROFIT +%.1f%% (%.0f¢→%.0f¢)", 
+					pnlPct.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+					position.EntryPrice.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+					currentPrice.Mul(decimal.NewFromInt(100)).InexactFloat64()))
+			continue
+		}
+
+		// 2. STOP LOSS - Price dropped too much
+		if pnlPct.LessThanOrEqual(ws.config.StopLossPct.Neg()) {
+			ws.executeExit(position, currentPrice, "stop_loss",
+				fmt.Sprintf("🛑 STOP LOSS %.1f%% (%.0f¢→%.0f¢)",
+					pnlPct.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+					position.EntryPrice.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+					currentPrice.Mul(decimal.NewFromInt(100)).InexactFloat64()))
+			continue
+		}
+
+		// 3. TRAILING STOP - Price fell from high water mark
+		if position.HighPrice.GreaterThan(position.EntryPrice) {
+			dropFromHigh := position.HighPrice.Sub(currentPrice).Div(position.HighPrice)
+			if dropFromHigh.GreaterThanOrEqual(ws.config.TrailingStopPct) {
+				// Only trigger if we're still in profit
+				if currentPrice.GreaterThan(position.EntryPrice) {
+					ws.executeExit(position, currentPrice, "trailing_stop",
+						fmt.Sprintf("📉 TRAILING STOP (high %.0f¢→%.0f¢, drop %.1f%%)",
+							position.HighPrice.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+							currentPrice.Mul(decimal.NewFromInt(100)).InexactFloat64(),
+							dropFromHigh.Mul(decimal.NewFromInt(100)).InexactFloat64()))
+					continue
+				}
+			}
+		}
+
+		// 4. TIME EXIT - Near resolution with profit
+		if timeLeft <= ws.config.TimeExitMinutes && timeLeft > 0 {
+			if pnlAbs.GreaterThanOrEqual(ws.config.MinProfitToExit) {
+				ws.executeExit(position, currentPrice, "time_exit",
+					fmt.Sprintf("⏰ TIME EXIT (%.1f min left, +%.2f¢ profit)",
+						timeLeft, pnlAbs.Mul(decimal.NewFromInt(100)).InexactFloat64()))
+				continue
+			}
+		}
+
+		// Log position status periodically (every ~5 seconds based on loop)
+		if time.Since(position.EntryTime).Seconds() > 5 && 
+			int(time.Since(position.EntryTime).Seconds())%10 == 0 {
+			log.Debug().
+				Str("asset", position.Asset).
+				Str("side", position.Side).
+				Str("entry", fmt.Sprintf("%.0f¢", position.EntryPrice.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+				Str("current", fmt.Sprintf("%.0f¢", currentPrice.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+				Str("high", fmt.Sprintf("%.0f¢", position.HighPrice.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+				Str("pnl", fmt.Sprintf("%+.1f%%", pnlPct.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+				Str("time_left", fmt.Sprintf("%.1fm", timeLeft)).
+				Msg("🐋 Position status")
+		}
+	}
+}
+
+// executeExit sells position and records P&L
+func (ws *WhaleStrategy) executeExit(position *WhalePosition, exitPrice decimal.Decimal, reason, message string) {
+	// Calculate P&L
+	pnl := exitPrice.Sub(position.EntryPrice).Mul(position.Size)
+	
+	modeStr := "LIVE"
+	if ws.paperTrade {
+		modeStr = "PAPER"
+	}
+
+	log.Info().
+		Str("mode", modeStr).
+		Str("asset", position.Asset).
+		Str("side", position.Side).
+		Str("entry", fmt.Sprintf("%.0f¢", position.EntryPrice.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+		Str("exit", fmt.Sprintf("%.0f¢", exitPrice.Mul(decimal.NewFromInt(100)).InexactFloat64())).
+		Str("pnl", fmt.Sprintf("%+$%.4f", pnl.InexactFloat64())).
+		Str("reason", reason).
+		Msg(message)
+
+	if ws.paperTrade {
+		// PAPER TRADE - just log
+		log.Info().
+			Str("asset", position.Asset).
+			Str("size", position.Size.String()).
+			Str("pnl", fmt.Sprintf("%+$%.4f", pnl.InexactFloat64())).
+			Msg("📝 [WHALE] Paper SELL recorded")
+	} else {
+		// LIVE TRADE - execute sell order
+		_, err := ws.clobClient.PlaceMarketSell(position.TokenID, position.Size)
+		if err != nil {
+			log.Error().Err(err).
+				Str("asset", position.Asset).
+				Msg("🐋❌ Failed to execute exit order")
+			return // Don't update position if sell failed
+		}
+	}
+
+	// Update position
+	position.Status = "exited_" + reason
+	position.ExitPrice = exitPrice
+	position.ExitReason = reason
+	position.PnL = pnl
+
+	// Update stats
+	if pnl.GreaterThan(decimal.Zero) {
+		ws.stats.Wins++
+	} else {
+		ws.stats.Losses++
+	}
+	ws.stats.TotalPnL = ws.stats.TotalPnL.Add(pnl)
+	
+	if pnl.GreaterThan(ws.stats.BestTrade) {
+		ws.stats.BestTrade = pnl
+	}
+	if pnl.LessThan(ws.stats.WorstTrade) || ws.stats.WorstTrade.IsZero() {
+		ws.stats.WorstTrade = pnl
+	}
+
+	// Remove from active positions
+	delete(ws.positions, position.WindowID)
+
+	// Log cumulative stats
+	winRate := decimal.Zero
+	if ws.stats.TotalTrades > 0 {
+		winRate = decimal.NewFromInt(int64(ws.stats.Wins)).Div(decimal.NewFromInt(int64(ws.stats.TotalTrades))).Mul(decimal.NewFromInt(100))
+	}
+	
+	log.Info().
+		Int("total_trades", ws.stats.TotalTrades).
+		Int("wins", ws.stats.Wins).
+		Int("losses", ws.stats.Losses).
+		Str("win_rate", fmt.Sprintf("%.1f%%", winRate.InexactFloat64())).
+		Str("total_pnl", fmt.Sprintf("%+$%.4f", ws.stats.TotalPnL.InexactFloat64())).
+		Msg("🐋📊 Whale stats update")
 }
 
 // scanForCrashedOdds looks for odds that have crashed into our buy zone
@@ -628,22 +852,24 @@ func (ws *WhaleStrategy) ExecuteTrade(signal *WhaleSignal, positionSize decimal.
 		orderID = order.OrderID
 	}
 
-	// Create position
+	// Create position with high water mark for trailing stop
 	position := &WhalePosition{
-		TradeID:     orderID,
-		Asset:       signal.Window.Asset,
-		Side:        signal.Side,
-		TokenID:     tokenID,
-		ConditionID: signal.Window.ConditionID,
-		WindowID:    signal.Window.ID,
-		EntryPrice:  signal.CurrentOdds,
-		Size:        positionSize.Div(signal.CurrentOdds), // Approx shares
-		EntryTime:   time.Now(),
-		WindowEnd:   signal.Window.EndDate,
-		OddsDropPct: signal.DropFromHigh,
-		ExpectedRR:  signal.ExpectedRR,
-		BreakevenWR: signal.BreakevenWR,
-		Status:      "holding",
+		TradeID:      orderID,
+		Asset:        signal.Window.Asset,
+		Side:         signal.Side,
+		TokenID:      tokenID,
+		ConditionID:  signal.Window.ConditionID,
+		WindowID:     signal.Window.ID,
+		EntryPrice:   signal.CurrentOdds,
+		CurrentPrice: signal.CurrentOdds,
+		HighPrice:    signal.CurrentOdds, // Initialize high water mark
+		Size:         positionSize.Div(signal.CurrentOdds), // Approx shares
+		EntryTime:    time.Now(),
+		WindowEnd:    signal.Window.EndDate,
+		OddsDropPct:  signal.DropFromHigh,
+		ExpectedRR:   signal.ExpectedRR,
+		BreakevenWR:  signal.BreakevenWR,
+		Status:       "holding",
 	}
 
 	// Store position

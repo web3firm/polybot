@@ -92,6 +92,12 @@ SignatureType    int    // 0=EOA, 1=Magic/Email, 2=Proxy
 	WhaleBTCOptimalEntry  decimal.Decimal // 35¢ - R:R 1:1.86
 	WhaleETHOptimalEntry  decimal.Decimal // 40¢ - R:R 1:1.50
 	WhaleSOLOptimalEntry  decimal.Decimal // 45¢ - R:R 1:1.22
+	// 🎯 Whale Exit Strategy (PROFIT TAKING)
+	WhaleTakeProfitPct    decimal.Decimal // Take profit at +X% (e.g., 0.20 = +20%)
+	WhaleStopLossPct      decimal.Decimal // Stop loss at -X% (e.g., 0.30 = -30%)
+	WhaleTrailingStopPct  decimal.Decimal // Trailing stop from high (e.g., 0.15 = 15%)
+	WhaleTimeExitMin      float64         // Exit X minutes before resolution
+	WhaleHoldToResolution bool            // If true, ignore TP/SL
 
 	// Triple Exit Strategy
 	ArbExitOddsThreshold decimal.Decimal // e.g., 0.75 = exit at 75¢ for quick flip
@@ -184,6 +190,12 @@ SignatureType:    getEnvInt("SIGNATURE_TYPE", 0),
 		WhaleBTCOptimalEntry:  getEnvDecimal("WHALE_BTC_OPTIMAL_ENTRY", decimal.NewFromFloat(0.35)), // R:R 1:1.86
 		WhaleETHOptimalEntry:  getEnvDecimal("WHALE_ETH_OPTIMAL_ENTRY", decimal.NewFromFloat(0.40)), // R:R 1:1.50
 		WhaleSOLOptimalEntry:  getEnvDecimal("WHALE_SOL_OPTIMAL_ENTRY", decimal.NewFromFloat(0.45)), // R:R 1:1.22
+		// 🎯 Whale Exit Strategy (TAKE PROFITS!)
+		WhaleTakeProfitPct:    getEnvDecimal("WHALE_TAKE_PROFIT_PCT", decimal.NewFromFloat(0.20)),   // +20% take profit
+		WhaleStopLossPct:      getEnvDecimal("WHALE_STOP_LOSS_PCT", decimal.NewFromFloat(0.30)),    // -30% stop loss
+		WhaleTrailingStopPct:  getEnvDecimal("WHALE_TRAILING_STOP_PCT", decimal.NewFromFloat(0.15)), // 15% trailing
+		WhaleTimeExitMin:      getEnvFloat("WHALE_TIME_EXIT_MIN", 0.5),                             // 30 sec before resolution
+		WhaleHoldToResolution: getEnvBool("WHALE_HOLD_TO_RESOLUTION", false),                       // false = take profits
 
 		// Triple Exit Strategy
 		ArbExitOddsThreshold: getEnvDecimal("ARB_EXIT_ODDS", decimal.NewFromFloat(0.75)),       // Sell at 75¢+
