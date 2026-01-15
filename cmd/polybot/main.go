@@ -285,7 +285,7 @@ func main() {
 	// Buy extreme mispricings (<20¢) and sell when they bounce to 33¢+
 	// CRITICAL: Uses engine's price-to-beat data to avoid late entries!
 	var scalperStrategies []*arbitrage.ScalperStrategy
-	if !useSwing && !useSniper {
+	if !useSwing && !useSniper && !useWhale {
 		scalperStrategies = make([]*arbitrage.ScalperStrategy, 0, len(assets))
 		for i, asset := range assets {
 			scalper := arbitrage.NewScalperStrategy(

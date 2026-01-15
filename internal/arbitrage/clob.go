@@ -414,10 +414,29 @@ func (c *CLOBClient) PlaceMarketSellAtPrice(tokenID string, size decimal.Decimal
 func (c *CLOBClient) SellSharesAtPrice(tokenID string, shares decimal.Decimal, exitPrice decimal.Decimal) (*OrderResponse, error) {
 	start := time.Now()
 
-	// For sells, we want to sell AT or BELOW the current price for fast fill
-	// Subtract slippage to ensure we get filled
-	slippage := decimal.NewFromFloat(0.03)
-	price := exitPrice.Sub(slippage)
+	// For sells, use AGGRESSIVE slippage to ensure fill in fast markets
+	// Problem: TP triggers at 70¢, but price drops to 50¢ before order executes
+	// Solution: Set sell price LOW enough to guarantee fill
+	// 
+	// Slippage strategy:
+	// - For high prices (>50¢): use 15% slippage (70¢ → sell at 60¢)
+	// - For low prices (<50¢): use 20% slippage (30¢ → sell at 24¢)
+	// This ensures we get SOME profit rather than missing the exit entirely
+	
+	var price decimal.Decimal
+	fiftyPercent := decimal.NewFromFloat(0.50)
+	
+	if exitPrice.GreaterThan(fiftyPercent) {
+		// High price - 15% slippage
+		slippage := exitPrice.Mul(decimal.NewFromFloat(0.15))
+		price = exitPrice.Sub(slippage)
+	} else {
+		// Low price - 20% slippage  
+		slippage := exitPrice.Mul(decimal.NewFromFloat(0.20))
+		price = exitPrice.Sub(slippage)
+	}
+	
+	// Minimum price floor
 	if price.LessThan(decimal.NewFromFloat(0.01)) {
 		price = decimal.NewFromFloat(0.01)
 	}

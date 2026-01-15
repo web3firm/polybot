@@ -324,7 +324,7 @@ func (ws *WhaleStrategy) mainLoop() {
 
 // exitMonitorLoop monitors open positions for exit conditions
 func (ws *WhaleStrategy) exitMonitorLoop() {
-	ticker := time.NewTicker(250 * time.Millisecond) // Check exits fast
+	ticker := time.NewTicker(100 * time.Millisecond) // Check exits FAST - 100ms
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -353,6 +353,15 @@ func (ws *WhaleStrategy) checkExitConditions() {
 
 	for windowID, position := range ws.positions {
 		if position.Status != "holding" {
+			// Skip positions that are not holding (failed, exited, etc.)
+			// Also delete exit_failed positions to prevent memory leak
+			if position.Status == "exit_failed" {
+				log.Warn().
+					Str("asset", position.Asset).
+					Str("side", position.Side).
+					Msg("🐋⚠️ Position exit failed - removing from tracking")
+				delete(ws.positions, windowID)
+			}
 			continue
 		}
 
@@ -481,7 +490,9 @@ func (ws *WhaleStrategy) executeExit(position *WhalePosition, exitPrice decimal.
 				Str("asset", position.Asset).
 				Str("shares", position.Size.String()).
 				Msg("🐋❌ Failed to execute exit order")
-			return // Don't update position if sell failed
+			// CRITICAL: Mark position as failed to prevent retry spam
+			position.Status = "exit_failed"
+			return
 		}
 	}
 
@@ -855,6 +866,15 @@ func (ws *WhaleStrategy) ExecuteTrade(signal *WhaleSignal, positionSize decimal.
 	}
 
 	// Create position with high water mark for trailing stop
+	// CRITICAL: Calculate shares same way as CLOB client to ensure consistency
+	// shares = dollars / price, with minimum 5 shares
+	actualShares := positionSize.Div(signal.CurrentOdds)
+	minShares := decimal.NewFromInt(5)
+	if actualShares.LessThan(minShares) {
+		actualShares = minShares
+	}
+	actualShares = actualShares.Round(2) // Match CLOB rounding
+	
 	position := &WhalePosition{
 		TradeID:      orderID,
 		Asset:        signal.Window.Asset,
@@ -865,7 +885,7 @@ func (ws *WhaleStrategy) ExecuteTrade(signal *WhaleSignal, positionSize decimal.
 		EntryPrice:   signal.CurrentOdds,
 		CurrentPrice: signal.CurrentOdds,
 		HighPrice:    signal.CurrentOdds, // Initialize high water mark
-		Size:         positionSize.Div(signal.CurrentOdds), // Approx shares
+		Size:         actualShares,        // Use calculated shares matching CLOB
 		EntryTime:    time.Now(),
 		WindowEnd:    signal.Window.EndDate,
 		OddsDropPct:  signal.DropFromHigh,
@@ -873,6 +893,14 @@ func (ws *WhaleStrategy) ExecuteTrade(signal *WhaleSignal, positionSize decimal.
 		BreakevenWR:  signal.BreakevenWR,
 		Status:       "holding",
 	}
+	
+	log.Info().
+		Str("asset", signal.Window.Asset).
+		Str("side", signal.Side).
+		Str("dollars", positionSize.String()).
+		Str("shares", actualShares.String()).
+		Str("entry_price", signal.CurrentOdds.String()).
+		Msg("🐋 Position tracked")
 
 	// Store position
 	ws.positions[signal.Window.ID] = position
