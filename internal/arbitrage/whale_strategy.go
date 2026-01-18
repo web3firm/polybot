@@ -744,34 +744,50 @@ func (ws *WhaleStrategy) calculateSignalStrength(
 	
 	// MOMENTUM CHECK: Only buy when price is RISING (bouncing), not still falling!
 	// This prevents buying into a falling knife
-	if priceHistory != nil && len(priceHistory.Prices) >= 3 {
-		n := len(priceHistory.Prices)
-		// Check last 3 prices: is price trending UP?
-		prev2 := priceHistory.Prices[n-3]
-		prev1 := priceHistory.Prices[n-2]
-		current := priceHistory.Prices[n-1]
-		
-		// Price should be rising: prev2 < prev1 < current (bouncing)
-		// Or at least: prev1 < current (uptick)
-		if current.LessThanOrEqual(prev1) {
-			// Price is flat or still falling - DO NOT ENTER
-			log.Debug().
-				Str("prev2", prev2.StringFixed(2)).
-				Str("prev1", prev1.StringFixed(2)).
-				Str("current", current.StringFixed(2)).
-				Msg("⏸️ MOMENTUM BLOCKED: Price not rising, waiting for bounce")
-			return decimal.Zero
-		}
-		
-		// Bonus: Strong bounce = prev1 was the bottom
-		if prev1.LessThan(prev2) && current.GreaterThan(prev1) {
-			log.Debug().
-				Str("prev2", prev2.StringFixed(2)).
-				Str("prev1", prev1.StringFixed(2)).
-				Str("current", current.StringFixed(2)).
-				Msg("🔄 V-SHAPE BOUNCE: Good entry timing detected!")
-		}
+	// Require at least 5 data points (25+ seconds of history) for reliable momentum
+	if priceHistory == nil || len(priceHistory.Prices) < 5 {
+		log.Debug().Msg("⏸️ MOMENTUM: Waiting for more price history (need 5 data points)")
+		return decimal.Zero // Not enough data to confirm momentum
 	}
+	
+	n := len(priceHistory.Prices)
+	// Check last 5 prices for trend
+	p1 := priceHistory.Prices[n-5]
+	p2 := priceHistory.Prices[n-4]
+	p3 := priceHistory.Prices[n-3]
+	p4 := priceHistory.Prices[n-2]
+	p5 := priceHistory.Prices[n-1] // current
+	
+	// REQUIRE V-SHAPE BOUNCE:
+	// Price must have fallen (p1 > p2 > p3) then recovered (p3 < p4 < p5)
+	// This confirms we're buying AFTER the bottom, not during the fall
+	wasFalling := p1.GreaterThan(p2) && p2.GreaterThan(p3)
+	isRising := p3.LessThan(p4) && p4.LessThan(p5)
+	
+	if !wasFalling {
+		log.Debug().
+			Str("p1", p1.StringFixed(2)).
+			Str("p2", p2.StringFixed(2)).
+			Str("p3", p3.StringFixed(2)).
+			Msg("⏸️ MOMENTUM BLOCKED: No prior crash detected (p1 > p2 > p3 required)")
+		return decimal.Zero
+	}
+	
+	if !isRising {
+		log.Debug().
+			Str("p3", p3.StringFixed(2)).
+			Str("p4", p4.StringFixed(2)).
+			Str("p5", p5.StringFixed(2)).
+			Msg("⏸️ MOMENTUM BLOCKED: Price not bouncing yet (p3 < p4 < p5 required)")
+		return decimal.Zero
+	}
+	
+	// V-SHAPE CONFIRMED!
+	log.Info().
+		Str("fell_from", p1.StringFixed(2)).
+		Str("bottom", p3.StringFixed(2)).
+		Str("bounced_to", p5.StringFixed(2)).
+		Msg("🔄 V-SHAPE BOUNCE CONFIRMED! Good entry timing")
 	
 	strength := decimal.Zero
 
@@ -1040,29 +1056,29 @@ func (ws *WhaleStrategy) GetActivePositions() []*WhalePosition {
 // PrintStrategyInfo logs whale strategy explanation
 func (ws *WhaleStrategy) PrintStrategyInfo() {
 	log.Info().Msg("═══════════════════════════════════════════════════════════════")
-	log.Info().Msg("🐋 WHALE STRATEGY - ML-TRAINED CONTRARIAN DIP BUYING")
+	log.Info().Msg("🐋 WHALE STRATEGY - BUY LOW SELL HIGH")
 	log.Info().Msg("═══════════════════════════════════════════════════════════════")
 	log.Info().Msg("")
-	log.Info().Msg("📊 Trained on 150,411 trades from top whale wallets")
+	log.Info().Msg("📊 Entry Requirements:")
+	log.Info().Msg("   1. Price in range (15-55¢)")
+	log.Info().Msg("   2. Crash detected (10¢+ drop from high)")
+	log.Info().Msg("   3. Momentum UP (price bouncing, not falling)")
 	log.Info().Msg("")
-	log.Info().Msg("📈 KEY INSIGHT:")
-	log.Info().Msg("   Whales buy when odds CRASH, not when they're high")
-	log.Info().Msg("   - Entry at 15-55¢ (not 60-85¢)")
-	log.Info().Msg("   - Hold to resolution (no quick flip)")
-	log.Info().Msg("   - NO stop loss (binary outcome)")
-	log.Info().Msg("")
-	log.Info().Msg("💰 R:R COMPARISON:")
-	log.Info().Msg("   Your Old Strategy: Entry 83¢, R:R 1:0.52, Breakeven 66%")
-	log.Info().Msg("   Whale Strategy:    Entry 35¢, R:R 1:1.86, Breakeven 35%")
+	log.Info().Msg("📈 Exit Strategy:")
+	if ws.config.HoldToResolution {
+		log.Info().Msg("   Mode: HOLD TO RESOLUTION ($1 payout)")
+		log.Info().Msg("   - No stop loss (binary outcome)")
+		log.Info().Msg("   - Wait for window to resolve")
+	} else {
+		log.Info().Msgf("   Mode: BUY LOW SELL HIGH")
+		log.Info().Msgf("   - Take Profit: +%.0f%%", ws.config.TakeProfitPct.Mul(decimal.NewFromInt(100)).InexactFloat64())
+		log.Info().Msgf("   - Stop Loss: -%.0f%%", ws.config.StopLossPct.Mul(decimal.NewFromInt(100)).InexactFloat64())
+		log.Info().Msgf("   - Trailing Stop: %.0f%% from high", ws.config.TrailingStopPct.Mul(decimal.NewFromInt(100)).InexactFloat64())
+	}
 	log.Info().Msg("")
 	log.Info().Msg("🎯 PER-ASSET ENTRY ZONES:")
-	log.Info().Msg("   BTC: 15-55¢ (optimal 35¢) R:R 1:1.86")
-	log.Info().Msg("   ETH: 20-60¢ (optimal 40¢) R:R 1:1.50")
-	log.Info().Msg("   SOL: 25-65¢ (optimal 45¢) R:R 1:1.22")
-	log.Info().Msg("")
-	log.Info().Msg("📉 EXPECTED VALUE:")
-	log.Info().Msg("   At 50% WR: +$0.15/share")
-	log.Info().Msg("   At 55% WR: +$0.20/share")
-	log.Info().Msg("   At 60% WR: +$0.25/share")
+	log.Info().Msg("   BTC: 15-55¢ (optimal 35¢)")
+	log.Info().Msg("   ETH: 20-60¢ (optimal 40¢)")
+	log.Info().Msg("   SOL: 25-65¢ (optimal 45¢)")
 	log.Info().Msg("═══════════════════════════════════════════════════════════════")
 }

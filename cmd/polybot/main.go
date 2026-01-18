@@ -349,9 +349,10 @@ func main() {
 	
 	// ====== 🐋 WHALE STRATEGY (ML-Trained Contrarian) ======
 	// Buy CRASHED odds (15-55¢) when others panic sell
-	// Hold to resolution for full $1 payout
+	// Buy low, sell high - take profit on momentum
 	// Trained on 150,411 whale trades - exploits odds mispricing
 	var whaleStrategies []*arbitrage.WhaleStrategy
+	var printedWhaleInfo bool // Only print banner once
 	if useWhale {
 		whaleStrategies = make([]*arbitrage.WhaleStrategy, 0, len(assets))
 		for i, asset := range assets {
@@ -396,7 +397,10 @@ func main() {
 				},
 			}
 			whale.SetConfig(whaleConfig)
-			whale.PrintStrategyInfo()
+			if !printedWhaleInfo {
+				whale.PrintStrategyInfo()
+				printedWhaleInfo = true
+			}
 			whale.Start()
 			whaleStrategies = append(whaleStrategies, whale)
 			log.Info().Str("asset", asset).Bool("paper", cfg.DryRun).Msg("🐋 Whale strategy started (contrarian dip buying)")
@@ -494,14 +498,14 @@ func main() {
 		log.Info().Msg("╚══════════════════════════════════════════╝")
 	} else if useWhale {
 		log.Info().Msg("╔══════════════════════════════════════════╗")
-		log.Info().Msg("║   🐋 WHALE STRATEGY - CONTRARIAN DIP 🐋   ║")
+		log.Info().Msg("║   🐋 WHALE STRATEGY - BUY LOW SELL HIGH  ║")
 		log.Info().Msg("║                                          ║")
-		log.Info().Msg("║  ML-Trained on 150k whale trades         ║")
+		log.Info().Msg("║  Entry: Crash + Momentum UP required     ║")
 		log.Info().Msg("║                                          ║")
 		log.Info().Msgf("║  Assets: %-32s ║", formatAssets(assets))
 		log.Info().Msg("║  → Buy CRASHED odds (15-55¢)            ║")
-		log.Info().Msg("║  → Hold to resolution ($1 payout)        ║")
-		log.Info().Msg("║  → NO stop loss (binary outcome)         ║")
+		log.Info().Msgf("║  → Take Profit: +%d%%                     ║", int(cfg.WhaleTakeProfitPct.Mul(decimal.NewFromInt(100)).IntPart()))
+		log.Info().Msgf("║  → Stop Loss: -%d%%                       ║", int(cfg.WhaleStopLossPct.Mul(decimal.NewFromInt(100)).IntPart()))
 		log.Info().Msg("║                                          ║")
 		log.Info().Msg("║  📈 R:R 1:1.86 @ 35¢ entry              ║")
 		log.Info().Msg("║  🎲 Breakeven: 35% WR (actual ~50%)      ║")
