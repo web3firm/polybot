@@ -52,8 +52,8 @@ solMinMove decimal.Decimal
 // Speed
 scanIntervalMs int
 
-// Sources
-binanceFeed   *feeds.BinanceFeed
+// Sources (PriceFeed interface - Chainlink or Binance)
+priceFeed     feeds.PriceFeed
 windowScanner *feeds.WindowScanner
 
 // State
@@ -71,7 +71,7 @@ timestamp time.Time
 }
 
 // NewSniper creates the sniper strategy
-func NewSniper(binanceFeed *feeds.BinanceFeed, windowScanner *feeds.WindowScanner) *Sniper {
+func NewSniper(priceFeed feeds.PriceFeed, windowScanner *feeds.WindowScanner) *Sniper {
 s := &Sniper{
 enabled:        true,
 minTimeSec:     envFloat("MIN_TIME_SEC", 15),
@@ -84,7 +84,7 @@ btcMinMove:     envDecimal("BTC_MIN_MOVE", 0.10),
 ethMinMove:     envDecimal("ETH_MIN_MOVE", 0.10),
 solMinMove:     envDecimal("SOL_MIN_MOVE", 0.15),
 scanIntervalMs: envInt("SCAN_INTERVAL_MS", 100),
-binanceFeed:    binanceFeed,
+priceFeed:      priceFeed,
 windowScanner:  windowScanner,
 lastSignal:     make(map[string]time.Time),
 cooldown:       10 * time.Second,
@@ -150,15 +150,14 @@ if last, ok := s.lastSignal[w.ID]; ok && time.Since(last) < s.cooldown {
 return nil
 }
 
-// Get Binance price
-symbol := w.Asset + "USDT"
-price := s.binanceFeed.GetPrice(symbol)
+// Get Chainlink-aligned price
+price := s.priceFeed.GetPrice(w.Asset)
 if price.IsZero() || w.PriceToBeat.IsZero() {
 return nil
 }
 
 // Track for momentum
-s.trackPrice(symbol, price)
+s.trackPrice(w.Asset, price)
 
 // Calculate move %
 move := price.Sub(w.PriceToBeat).Div(w.PriceToBeat).Mul(decimal.NewFromInt(100))
@@ -186,7 +185,7 @@ return nil
 }
 
 // Momentum confirmation
-if !s.checkMomentum(symbol, isAbove) {
+if !s.checkMomentum(w.Asset, isAbove) {
 return nil
 }
 

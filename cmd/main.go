@@ -54,44 +54,51 @@ func main() {
 		log.Info().Msg("✅ Storage layer initialized")
 	}
 
-	// 2. Binance feed (for real-time crypto prices)
+	// 2. Binance feed (fallback price source)
 	binanceFeed := feeds.NewBinanceFeed()
 	binanceFeed.Start()
 	log.Info().Msg("✅ Binance price feed initialized")
 
-	// 3. Polymarket feeds
+	// 3. Chainlink-aligned price feed (primary - matches Polymarket resolution)
+	cmcKey := os.Getenv("CMC_API_KEY") // Optional
+	chainlinkFeed := feeds.NewChainlinkFeed(cmcKey)
+	chainlinkFeed.SetBinanceFallback(binanceFeed)
+	chainlinkFeed.Start()
+	log.Info().Msg("✅ Chainlink price feed initialized")
+
+	// 4. Polymarket feeds
 	polyFeed := feeds.NewPolymarketFeed()
 	log.Info().Msg("✅ Polymarket feed initialized")
 
-	// 4. Window Scanner (tracks 15-min crypto windows)
-	windowScanner := feeds.NewWindowScanner(binanceFeed)
+	// 5. Window Scanner (tracks 15-min crypto windows)
+	windowScanner := feeds.NewWindowScanner(chainlinkFeed)
 	if db != nil {
 		windowScanner.SetDatabase(db) // Save snapshots to DB
 	}
 	windowScanner.Start()
 	log.Info().Msg("✅ Window scanner initialized")
 
-	// 5. Execution client
+	// 6. Execution client
 	executor, err := exec.NewClient()
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize executor")
 	}
 	log.Info().Msg("✅ Execution layer initialized")
 
-	// 6. Risk manager
+	// 7. Risk manager
 	riskMgr := risk.NewManager()
 	log.Info().Msg("✅ Risk layer initialized")
 
-	// 7. Sniper strategy
-	sniper := strategy.NewSniper(binanceFeed, windowScanner)
+	// 8. Sniper strategy (uses Chainlink prices)
+	sniper := strategy.NewSniper(chainlinkFeed, windowScanner)
 	strategies := []strategy.Strategy{sniper}
 	log.Info().Msg("✅ Strategy loaded")
 
-	// 8. Core engine
+	// 9. Core engine
 	engine := core.NewEngine(polyFeed, executor, riskMgr, strategies, db)
 	log.Info().Msg("✅ Engine initialized")
 
-	// 9. Telegram bot (optional - fails gracefully if not configured)
+	// 10. Telegram bot (optional - fails gracefully if not configured)
 	var tgBot *bot.TelegramBot
 	if tg, err := bot.NewTelegramBot(engine); err != nil {
 		log.Warn().Err(err).Msg("Telegram bot not available")
@@ -162,6 +169,7 @@ func main() {
 
 	log.Info().Msg("🛑 Shutting down...")
 	engine.Stop()
+	chainlinkFeed.Stop()
 	binanceFeed.Stop()
 	windowScanner.Stop()
 

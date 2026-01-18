@@ -83,6 +83,11 @@ func (w *Window) IsExpired() bool {
 	return time.Now().After(w.EndTime)
 }
 
+// PriceFeed interface for price sources
+type PriceFeed interface {
+	GetPrice(symbol string) decimal.Decimal
+}
+
 // WindowScanner manages window discovery and tracking
 type WindowScanner struct {
 	mu      sync.RWMutex
@@ -92,8 +97,8 @@ type WindowScanner struct {
 	// Active windows by market ID
 	windows map[string]*Window
 
-	// Binance feed for start prices
-	binanceFeed *BinanceFeed
+	// Price feed (Chainlink or Binance)
+	priceFeed PriceFeed
 
 	// Database for snapshots (optional)
 	db SnapshotSaver
@@ -103,11 +108,11 @@ type WindowScanner struct {
 }
 
 // NewWindowScanner creates a new scanner
-func NewWindowScanner(binanceFeed *BinanceFeed) *WindowScanner {
+func NewWindowScanner(priceFeed PriceFeed) *WindowScanner {
 	return &WindowScanner{
 		stopCh:      make(chan struct{}),
 		windows:     make(map[string]*Window),
-		binanceFeed: binanceFeed,
+		priceFeed:   priceFeed,
 		subscribers: make([]chan *Window, 0),
 	}
 }
@@ -291,9 +296,8 @@ func (s *WindowScanner) fetchAssetWindows(asset string) {
 			}
 		}
 
-		// Get start price from Binance
-		symbol := asset + "USDT"
-		startPrice := s.binanceFeed.GetPrice(symbol)
+		// Get start price from Chainlink-aligned feed
+		startPrice := s.priceFeed.GetPrice(asset)
 
 		window := &Window{
 			ID:          m.ConditionID,
@@ -383,14 +387,13 @@ func (s *WindowScanner) cleanupExpired() {
 		}
 	}
 	db := s.db
-	binance := s.binanceFeed
+	pf := s.priceFeed
 	s.mu.Unlock()
 
 	// Record outcomes for expired windows
 	for _, w := range expired {
-		// Get final Binance price
-		symbol := w.Asset + "USDT"
-		endPrice := binance.GetPrice(symbol)
+		// Get final price from Chainlink feed
+		endPrice := pf.GetPrice(w.Asset)
 
 		// Determine outcome
 		outcome := "NO"
