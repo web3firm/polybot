@@ -329,6 +329,49 @@ func (e *Engine) GetStats() (trades, wins, losses int, pnl, equity decimal.Decim
 	return e.totalTrades, e.winCount, e.lossCount, e.totalPnL, e.equity
 }
 
+// GetPositions returns all open positions for display
+func (e *Engine) GetPositions() []PositionInfo {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	result := make([]PositionInfo, 0, len(e.positions))
+	for _, pos := range e.positions {
+		// Get current price
+		current := e.feed.GetPrice(pos.Market, pos.Side)
+		if current.IsZero() {
+			current = pos.EntryPrice
+		}
+
+		pnl := current.Sub(pos.EntryPrice).Mul(pos.Size)
+		pnlPct := decimal.Zero
+		if !pos.EntryPrice.IsZero() {
+			pnlPct = current.Sub(pos.EntryPrice).Div(pos.EntryPrice).Mul(decimal.NewFromInt(100))
+		}
+
+		result = append(result, PositionInfo{
+			Asset:      pos.Asset,
+			Side:       pos.Side,
+			Entry:      pos.EntryPrice,
+			Current:    current,
+			PnL:        pnl,
+			PnLPercent: pnlPct,
+			Duration:   time.Since(pos.EntryTime),
+		})
+	}
+	return result
+}
+
+// PositionInfo represents a position for display
+type PositionInfo struct {
+	Asset      string
+	Side       string
+	Entry      decimal.Decimal
+	Current    decimal.Decimal
+	PnL        decimal.Decimal
+	PnLPercent decimal.Decimal
+	Duration   time.Duration
+}
+
 // ProcessSignal handles a signal from external sources (like SniperV3's RunLoop)
 func (e *Engine) ProcessSignal(signal *strategy.Signal, strategyName string) {
 	if signal == nil {

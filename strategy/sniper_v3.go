@@ -438,3 +438,21 @@ func envFloat(key string, fallback float64) float64 {
 	}
 	return fallback
 }
+
+func envDecimal(key string, fallback float64) decimal.Decimal {
+	if val := os.Getenv(key); val != "" {
+		if d, err := decimal.NewFromString(val); err == nil {
+			return d
+		}
+	}
+	return decimal.NewFromFloat(fallback)
+}
+
+func envInt(key string, fallback int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return fallback
+}

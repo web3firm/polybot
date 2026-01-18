@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/web3guy0/polybot/bot"
 	"github.com/web3guy0/polybot/core"
 	"github.com/web3guy0/polybot/exec"
 	"github.com/web3guy0/polybot/feeds"
@@ -89,6 +90,16 @@ func main() {
 	engine := core.NewEngine(polyFeed, executor, riskMgr, strategies, db)
 	log.Info().Msg("✅ Core engine initialized")
 
+	// 9. Telegram bot (optional - fails gracefully if not configured)
+	var tgBot *bot.TelegramBot
+	if tg, err := bot.NewTelegramBot(engine); err != nil {
+		log.Warn().Err(err).Msg("Telegram bot not available")
+	} else {
+		tgBot = tg
+		tgBot.Start()
+		log.Info().Msg("✅ Telegram bot initialized")
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════════
 	// PRINT CONFIG
 	// ═══════════════════════════════════════════════════════════════════════════════
@@ -136,6 +147,15 @@ func main() {
 
 	log.Info().Msg("🚀 All systems running...")
 
+	// Send Telegram startup notification
+	if tgBot != nil {
+		mode := "PAPER"
+		if os.Getenv("DRY_RUN") != "true" {
+			mode = "LIVE"
+		}
+		tgBot.NotifyStartup(mode)
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════════
 	// GRACEFUL SHUTDOWN
 	// ═══════════════════════════════════════════════════════════════════════════════
@@ -148,6 +168,10 @@ func main() {
 	engine.Stop()
 	binanceFeed.Stop()
 	windowScanner.Stop()
+
+	if tgBot != nil {
+		tgBot.Stop()
+	}
 
 	if db != nil {
 		db.Close()
