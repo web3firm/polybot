@@ -1324,8 +1324,8 @@ func (e *Engine) analyzeWindow(state *WindowState, currentPrice decimal.Decimal)
 		return nil // Not enough edge
 	}
 
-	// 🚀 OPPORTUNITY FOUND! Log it prominently
-	log.Info().
+	// 🚀 OPPORTUNITY FOUND! Log at Debug level to avoid spam
+	log.Debug().
 		Str("direction", direction).
 		Str("btc_move", absChangePct.Mul(decimal.NewFromInt(100)).StringFixed(2)+"%").
 		Str("odds", marketOdds.String()).

@@ -39,11 +39,14 @@ import (
 const version = "5.0.0" // Mean Reversion Swing Trading
 
 func main() {
+	// Load environment FIRST (before checking any env vars)
+	_ = godotenv.Load() // Ignore error - may use env vars directly
+	
 	// Check for dashboard mode FIRST (before setting up zerolog)
 	useDashboard := false
 	useSwing := false      // Mean reversion swing trading
 	useSniper := false     // Last minute sniper strategy
-	useWhale := false      // 🐋 Whale strategy (ML-trained contrarian)
+	useWhale := os.Getenv("USE_WHALE") == "true" || os.Getenv("USE_WHALE") == "1"  // 🐋 Whale strategy (ML-trained contrarian)
 	for _, arg := range os.Args[1:] {
 		if arg == "--dashboard" || arg == "-d" || arg == "--responsive" || arg == "-r" {
 			useDashboard = true
@@ -103,11 +106,8 @@ func main() {
 		return
 	}
 
-	// Load environment
-	if err := godotenv.Load(); err != nil {
-		log.Warn().Msg("No .env file found, using environment variables")
-	}
-
+	// .env already loaded at start of main()
+	
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {

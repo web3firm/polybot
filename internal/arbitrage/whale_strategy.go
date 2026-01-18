@@ -682,16 +682,18 @@ func (ws *WhaleStrategy) CheckEntry(window *polymarket.PredictionWindow) (*Whale
 		history, exists := ws.priceHistory[key]
 		
 		var dropFromHigh decimal.Decimal
+		var priceHist *PriceHistory
 		if exists && !history.High.IsZero() {
 			dropFromHigh = history.High.Sub(currentOdds)
+			priceHist = history
 		}
 
 		// Calculate R:R for this entry
 		rr := ws.config.CalculateRR(currentOdds)
 		breakevenWR := ws.config.CalculateBreakevenWinRate(currentOdds)
 
-		// Determine signal strength
-		strength := ws.calculateSignalStrength(currentOdds, optimalEntry, dropFromHigh)
+		// Determine signal strength (now checks momentum too!)
+		strength := ws.calculateSignalStrength(currentOdds, optimalEntry, dropFromHigh, priceHist)
 
 		// Generate signal if conditions met
 		if strength.GreaterThan(decimal.Zero) {
@@ -727,34 +729,75 @@ type WhaleSignal struct {
 }
 
 // calculateSignalStrength determines how good the entry is (0-100)
+// CRITICAL: Now REQUIRES a meaningful drop from high AND positive momentum to generate a signal!
 func (ws *WhaleStrategy) calculateSignalStrength(
 	currentOdds, optimalEntry, dropFromHigh decimal.Decimal,
+	priceHistory *PriceHistory,
 ) decimal.Decimal {
+	// CRITICAL CHECK: No drop from high = NO SIGNAL
+	// We don't buy just because price is at 35¢
+	// We ONLY buy if price DROPPED to 35¢ from higher!
+	minDropRequired := decimal.NewFromFloat(0.10) // Require at least 10¢ drop from high
+	if dropFromHigh.LessThan(minDropRequired) {
+		return decimal.Zero // No crash detected = no entry!
+	}
+	
+	// MOMENTUM CHECK: Only buy when price is RISING (bouncing), not still falling!
+	// This prevents buying into a falling knife
+	if priceHistory != nil && len(priceHistory.Prices) >= 3 {
+		n := len(priceHistory.Prices)
+		// Check last 3 prices: is price trending UP?
+		prev2 := priceHistory.Prices[n-3]
+		prev1 := priceHistory.Prices[n-2]
+		current := priceHistory.Prices[n-1]
+		
+		// Price should be rising: prev2 < prev1 < current (bouncing)
+		// Or at least: prev1 < current (uptick)
+		if current.LessThanOrEqual(prev1) {
+			// Price is flat or still falling - DO NOT ENTER
+			log.Debug().
+				Str("prev2", prev2.StringFixed(2)).
+				Str("prev1", prev1.StringFixed(2)).
+				Str("current", current.StringFixed(2)).
+				Msg("⏸️ MOMENTUM BLOCKED: Price not rising, waiting for bounce")
+			return decimal.Zero
+		}
+		
+		// Bonus: Strong bounce = prev1 was the bottom
+		if prev1.LessThan(prev2) && current.GreaterThan(prev1) {
+			log.Debug().
+				Str("prev2", prev2.StringFixed(2)).
+				Str("prev1", prev1.StringFixed(2)).
+				Str("current", current.StringFixed(2)).
+				Msg("🔄 V-SHAPE BOUNCE: Good entry timing detected!")
+		}
+	}
+	
 	strength := decimal.Zero
 
 	// Distance from optimal entry (closer = better)
-	// If at optimal, +40 points
-	// If within 10¢, +30 points
+	// If at optimal, +30 points
+	// If within 10¢, +20 points
 	optimalDiff := currentOdds.Sub(optimalEntry).Abs()
 	if optimalDiff.LessThanOrEqual(decimal.NewFromFloat(0.05)) {
-		strength = strength.Add(decimal.NewFromFloat(40))
-	} else if optimalDiff.LessThanOrEqual(decimal.NewFromFloat(0.10)) {
 		strength = strength.Add(decimal.NewFromFloat(30))
-	} else if optimalDiff.LessThanOrEqual(decimal.NewFromFloat(0.15)) {
+	} else if optimalDiff.LessThanOrEqual(decimal.NewFromFloat(0.10)) {
 		strength = strength.Add(decimal.NewFromFloat(20))
+	} else if optimalDiff.LessThanOrEqual(decimal.NewFromFloat(0.15)) {
+		strength = strength.Add(decimal.NewFromFloat(15))
 	} else {
 		strength = strength.Add(decimal.NewFromFloat(10))
 	}
 
-	// Crash detection bonus (bigger drop = better)
-	if dropFromHigh.GreaterThanOrEqual(decimal.NewFromFloat(0.20)) {
-		strength = strength.Add(decimal.NewFromFloat(30)) // 20¢+ drop
+	// Crash detection bonus (bigger drop = better) - THIS IS NOW MANDATORY
+	if dropFromHigh.GreaterThanOrEqual(decimal.NewFromFloat(0.25)) {
+		strength = strength.Add(decimal.NewFromFloat(40)) // 25¢+ drop = panic selling
+	} else if dropFromHigh.GreaterThanOrEqual(decimal.NewFromFloat(0.20)) {
+		strength = strength.Add(decimal.NewFromFloat(35)) // 20¢+ drop = strong crash
 	} else if dropFromHigh.GreaterThanOrEqual(decimal.NewFromFloat(0.15)) {
-		strength = strength.Add(decimal.NewFromFloat(25))
+		strength = strength.Add(decimal.NewFromFloat(30)) // 15¢+ drop = good crash
 	} else if dropFromHigh.GreaterThanOrEqual(decimal.NewFromFloat(0.10)) {
-		strength = strength.Add(decimal.NewFromFloat(20))
-	} else if dropFromHigh.GreaterThanOrEqual(decimal.NewFromFloat(0.05)) {
-		strength = strength.Add(decimal.NewFromFloat(10))
+		strength = strength.Add(decimal.NewFromFloat(20)) // 10¢+ drop = minimum crash
 	}
 
 	// R:R bonus (higher R:R = better)

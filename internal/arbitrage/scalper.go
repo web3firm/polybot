@@ -868,19 +868,18 @@ func (s *ScalperStrategy) placeOrder(pos *ScalpPosition, w *polymarket.Predictio
 			return
 		}
 		
-		// Check for partial SELL
+		// Check for partial SELL - but DON'T retry, just accept the partial and move on
+		// Retrying partial sells causes multiple sales at progressively worse prices!
 		actualSold := filledSize.IntPart()
 		if actualSold > 0 && actualSold < pos.Size {
-			// Partial sell - update remaining position
-			remaining := pos.Size - actualSold
 			log.Warn().
 				Int64("ordered", pos.Size).
 				Int64("sold", actualSold).
-				Int64("remaining", remaining).
-				Msg("⚠️ [SCALP] Partial SELL - still have shares!")
-			pos.Size = remaining
-			// Don't delete position, keep managing it
-			return
+				Int64("unsold", pos.Size - actualSold).
+				Msg("⚠️ [SCALP] Partial SELL - accepting loss on remaining shares")
+			// Accept the partial fill and close position - don't retry at worse prices!
+			pos.Size = actualSold // Update to actual sold amount for P&L calc
+			// Fall through to close position
 		}
 		
 		// Calculate P&L
