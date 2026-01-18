@@ -107,8 +107,26 @@ func (d *Database) migrate() error {
 		equity NUMERIC(18,8) DEFAULT 0
 	);
 
+	CREATE TABLE IF NOT EXISTS window_snapshots (
+		id SERIAL PRIMARY KEY,
+		market_id TEXT NOT NULL,
+		asset TEXT NOT NULL,
+		price_to_beat NUMERIC(18,8) NOT NULL,
+		binance_start_price NUMERIC(18,8) NOT NULL,
+		binance_end_price NUMERIC(18,8),
+		yes_price NUMERIC(18,8),
+		no_price NUMERIC(18,8),
+		window_end TIMESTAMP NOT NULL,
+		created_at TIMESTAMP DEFAULT NOW(),
+		resolved_at TIMESTAMP,
+		outcome TEXT,
+		UNIQUE(market_id, created_at)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at);
 	CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+	CREATE INDEX IF NOT EXISTS idx_snapshots_market ON window_snapshots(market_id);
+	CREATE INDEX IF NOT EXISTS idx_snapshots_created ON window_snapshots(created_at);
 	`
 
 	_, err := d.db.Exec(schema)
@@ -252,6 +270,91 @@ func (d *Database) GetRecentTrades(limit int) ([]Trade, error) {
 	}
 
 	return trades, nil
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WINDOW SNAPSHOTS - Price tracking for each 15-min window
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// WindowSnapshot stores the Binance price when a window is first detected
+type WindowSnapshot struct {
+	ID               int64
+	MarketID         string
+	Asset            string
+	PriceToBeat      decimal.Decimal
+	BinanceStartPrice decimal.Decimal
+	BinanceEndPrice   decimal.Decimal
+	YesPrice          decimal.Decimal
+	NoPrice           decimal.Decimal
+	WindowEnd         time.Time
+	CreatedAt         time.Time
+	ResolvedAt        *time.Time
+	Outcome           string
+}
+
+// SaveWindowSnapshot records a new window with its start price
+func (d *Database) SaveWindowSnapshot(marketID, asset string, priceToBeat, binancePrice, yesPrice, noPrice decimal.Decimal, windowEnd time.Time) error {
+	if !d.enabled {
+		return nil
+	}
+
+	_, err := d.db.Exec(`
+		INSERT INTO window_snapshots (market_id, asset, price_to_beat, binance_start_price, yes_price, no_price, window_end)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (market_id, created_at) DO NOTHING
+	`, marketID, asset, priceToBeat, binancePrice, yesPrice, noPrice, windowEnd)
+
+	return err
+}
+
+// UpdateWindowOutcome updates a window with final price and outcome
+func (d *Database) UpdateWindowOutcome(marketID string, binanceEndPrice decimal.Decimal, outcome string) error {
+	if !d.enabled {
+		return nil
+	}
+
+	_, err := d.db.Exec(`
+		UPDATE window_snapshots 
+		SET binance_end_price = $2, outcome = $3, resolved_at = NOW()
+		WHERE market_id = $1 AND resolved_at IS NULL
+	`, marketID, binanceEndPrice, outcome)
+
+	return err
+}
+
+// GetRecentSnapshots returns recent window snapshots for analysis
+func (d *Database) GetRecentSnapshots(limit int) ([]WindowSnapshot, error) {
+	if !d.enabled {
+		return nil, nil
+	}
+
+	rows, err := d.db.Query(`
+		SELECT id, market_id, asset, price_to_beat, binance_start_price, 
+		       COALESCE(binance_end_price, 0), yes_price, no_price, window_end, created_at,
+		       resolved_at, COALESCE(outcome, '')
+		FROM window_snapshots ORDER BY created_at DESC LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var snapshots []WindowSnapshot
+	for rows.Next() {
+		var s WindowSnapshot
+		var resolvedAt sql.NullTime
+		if err := rows.Scan(&s.ID, &s.MarketID, &s.Asset, &s.PriceToBeat, &s.BinanceStartPrice,
+			&s.BinanceEndPrice, &s.YesPrice, &s.NoPrice, &s.WindowEnd, &s.CreatedAt,
+			&resolvedAt, &s.Outcome); err != nil {
+			continue
+		}
+		if resolvedAt.Valid {
+			s.ResolvedAt = &resolvedAt.Time
+		}
+		snapshots = append(snapshots, s)
+	}
+
+	return snapshots, nil
 }
 
 // Close closes the database connection

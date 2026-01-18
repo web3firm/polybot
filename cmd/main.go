@@ -65,6 +65,9 @@ func main() {
 
 	// 4. Window Scanner (tracks 15-min crypto windows)
 	windowScanner := feeds.NewWindowScanner(binanceFeed)
+	if db != nil {
+		windowScanner.SetDatabase(db) // Save snapshots to DB
+	}
 	windowScanner.Start()
 	log.Info().Msg("✅ Window scanner initialized")
 

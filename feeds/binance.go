@@ -24,7 +24,7 @@ import (
 
 const (
 	binanceAPIURL   = "https://api.binance.com/api/v3/ticker/price"
-	binanceInterval = 200 * time.Millisecond // 200ms for fast detection
+	binanceInterval = 100 * time.Millisecond // 100ms for rocket speed detection
 )
 
 // BinanceFeed provides real-time crypto prices

@@ -372,7 +372,7 @@ type PositionInfo struct {
 	Duration   time.Duration
 }
 
-// ProcessSignal handles a signal from external sources (like SniperV3's RunLoop)
+// ProcessSignal handles a signal from external sources (like Sniper's RunLoop)
 func (e *Engine) ProcessSignal(signal *strategy.Signal, strategyName string) {
 	if signal == nil {
 		return
@@ -395,4 +395,62 @@ func (e *Engine) ProcessSignal(signal *strategy.Signal, strategyName string) {
 
 	// Execute trade
 	e.executeSignal(signal, size, strategyName)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEGRAM BOT INTERFACE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GetBalance returns current USDC balance from exchange
+func (e *Engine) GetBalance() (decimal.Decimal, error) {
+	return e.executor.GetBalance()
+}
+
+// GetRecentTrades returns last N trades from database
+func (e *Engine) GetRecentTrades(limit int) ([]types.TradeRecord, error) {
+	if e.db == nil {
+		return nil, nil
+	}
+
+	dbTrades, err := e.db.GetRecentTrades(limit)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]types.TradeRecord, len(dbTrades))
+	for i, t := range dbTrades {
+		result[i] = types.TradeRecord{
+			ID:        t.ID,
+			Asset:     t.Asset,
+			Side:      t.Side,
+			Action:    t.Action,
+			Price:     t.Price,
+			Size:      t.Size,
+			PnL:       t.PnL,
+			Timestamp: t.Timestamp,
+		}
+	}
+
+	return result, nil
+}
+
+// GetOpenPositions returns open positions for Telegram
+func (e *Engine) GetOpenPositions() ([]types.PositionRecord, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	result := make([]types.PositionRecord, 0, len(e.positions))
+	for _, pos := range e.positions {
+		result = append(result, types.PositionRecord{
+			Asset:      pos.Asset,
+			Side:       pos.Side,
+			EntryPrice: pos.EntryPrice,
+			Size:       pos.Size,
+			StopLoss:   pos.StopLoss,
+			TakeProfit: pos.TakeProfit,
+			OpenedAt:   pos.EntryTime,
+		})
+	}
+
+	return result, nil
 }

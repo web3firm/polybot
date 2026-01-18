@@ -38,3 +38,26 @@ type Trade struct {
 	PnL       decimal.Decimal
 	Timestamp time.Time
 }
+
+// TradeRecord for display (Telegram bot)
+type TradeRecord struct {
+	ID        string
+	Asset     string
+	Side      string
+	Action    string
+	Price     decimal.Decimal
+	Size      decimal.Decimal
+	PnL       decimal.Decimal
+	Timestamp time.Time
+}
+
+// PositionRecord for display (Telegram bot)
+type PositionRecord struct {
+	Asset      string
+	Side       string
+	EntryPrice decimal.Decimal
+	Size       decimal.Decimal
+	StopLoss   decimal.Decimal
+	TakeProfit decimal.Decimal
+	OpenedAt   time.Time
+}

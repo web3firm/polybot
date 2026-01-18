@@ -24,8 +24,15 @@ import (
 //
 // Tracks:
 //   - Window end time (for "time remaining" calculation)
-//   - Price to beat (for % move calculation)
+//   - Price to beat (from Polymarket question)
+//   - Binance start price (snapshot when window detected)
 //   - Current odds (YES/NO)
+//
+// Price Discovery:
+//   - Polymarket uses Chainlink Data Streams (paid)
+//   - We use Binance spot price (close enough, free, 100ms)
+//   - Snapshot Binance price when window first detected
+//   - Store in DB for historical analysis
 //
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -33,6 +40,12 @@ const (
 	polymarketAPI   = "https://gamma-api.polymarket.com"
 	windowScanFreq  = 10 * time.Second
 )
+
+// SnapshotSaver interface for database
+type SnapshotSaver interface {
+	SaveWindowSnapshot(marketID, asset string, priceToBeat, binancePrice, yesPrice, noPrice decimal.Decimal, windowEnd time.Time) error
+	UpdateWindowOutcome(marketID string, binanceEndPrice decimal.Decimal, outcome string) error
+}
 
 // Window represents an active 15-minute market window
 type Window struct {
@@ -45,7 +58,7 @@ type Window struct {
 	YesPrice      decimal.Decimal // Current YES odds
 	NoPrice       decimal.Decimal // Current NO odds
 	Question      string          // Full question text
-	StartPrice    decimal.Decimal // Binance price at window start (cached)
+	StartPrice    decimal.Decimal // Binance price at window detection (cached)
 	LastUpdated   time.Time
 }
 
@@ -82,6 +95,9 @@ type WindowScanner struct {
 	// Binance feed for start prices
 	binanceFeed *BinanceFeed
 
+	// Database for snapshots (optional)
+	db SnapshotSaver
+
 	// Subscribers
 	subscribers []chan *Window
 }
@@ -94,6 +110,13 @@ func NewWindowScanner(binanceFeed *BinanceFeed) *WindowScanner {
 		binanceFeed: binanceFeed,
 		subscribers: make([]chan *Window, 0),
 	}
+}
+
+// SetDatabase attaches database for snapshot storage
+func (s *WindowScanner) SetDatabase(db SnapshotSaver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.db = db
 }
 
 // Start begins scanning for windows
@@ -294,21 +317,43 @@ func (s *WindowScanner) fetchAssetWindows(asset string) {
 func (s *WindowScanner) updateWindow(window *Window) {
 	s.mu.Lock()
 	existing, exists := s.windows[window.ID]
-	if !exists {
-		// New window - cache the start price
+	isNew := !exists
+	if isNew {
+		// New window - cache the start price from Binance
 		s.windows[window.ID] = window
-		log.Info().
-			Str("asset", window.Asset).
-			Str("target", window.PriceToBeat.StringFixed(0)).
-			Dur("remaining", window.TimeRemaining()).
-			Msg("🎯 New window detected")
 	} else {
 		// Update prices only
 		existing.YesPrice = window.YesPrice
 		existing.NoPrice = window.NoPrice
 		existing.LastUpdated = time.Now()
 	}
+	db := s.db
 	s.mu.Unlock()
+
+	// Save snapshot to database for new windows
+	if isNew {
+		log.Info().
+			Str("asset", window.Asset).
+			Str("target", window.PriceToBeat.StringFixed(0)).
+			Str("binance", window.StartPrice.StringFixed(2)).
+			Dur("remaining", window.TimeRemaining()).
+			Msg("🎯 New window detected")
+
+		// Save to DB if available
+		if db != nil {
+			if err := db.SaveWindowSnapshot(
+				window.ID,
+				window.Asset,
+				window.PriceToBeat,
+				window.StartPrice,
+				window.YesPrice,
+				window.NoPrice,
+				window.EndTime,
+			); err != nil {
+				log.Warn().Err(err).Msg("Failed to save window snapshot")
+			}
+		}
+	}
 
 	// Broadcast to subscribers
 	s.broadcast(window)
@@ -327,15 +372,42 @@ func (s *WindowScanner) broadcast(window *Window) {
 	}
 }
 
-// cleanupExpired removes expired windows
+// cleanupExpired removes expired windows and records outcomes
 func (s *WindowScanner) cleanupExpired() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	var expired []*Window
 	for id, w := range s.windows {
 		if w.IsExpired() {
+			expired = append(expired, w)
 			delete(s.windows, id)
-			log.Debug().Str("id", id).Msg("Window expired, removed")
+		}
+	}
+	db := s.db
+	binance := s.binanceFeed
+	s.mu.Unlock()
+
+	// Record outcomes for expired windows
+	for _, w := range expired {
+		// Get final Binance price
+		symbol := w.Asset + "USDT"
+		endPrice := binance.GetPrice(symbol)
+
+		// Determine outcome
+		outcome := "NO"
+		if endPrice.GreaterThanOrEqual(w.PriceToBeat) {
+			outcome = "YES"
+		}
+
+		log.Debug().
+			Str("asset", w.Asset).
+			Str("outcome", outcome).
+			Str("end_price", endPrice.StringFixed(2)).
+			Str("target", w.PriceToBeat.StringFixed(0)).
+			Msg("Window expired")
+
+		// Update database
+		if db != nil {
+			db.UpdateWindowOutcome(w.ID, endPrice, outcome)
 		}
 	}
 }

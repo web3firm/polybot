@@ -11,6 +11,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
+
+	"github.com/web3guy0/polybot/types"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -45,6 +47,9 @@ type TelegramBot struct {
 // StatsProvider provides trading statistics
 type StatsProvider interface {
 	GetStats() (trades, wins, losses int, pnl, equity decimal.Decimal)
+	GetBalance() (decimal.Decimal, error)
+	GetRecentTrades(limit int) ([]types.TradeRecord, error)
+	GetOpenPositions() ([]types.PositionRecord, error)
 }
 
 // PositionInfo represents a position for display
@@ -267,18 +272,27 @@ func (b *TelegramBot) NotifyError(err error) {
 
 // NotifyStartup sends startup notification
 func (b *TelegramBot) NotifyStartup(mode string) {
+	// Get balance if available
+	balanceStr := "N/A"
+	if b.statsProvider != nil {
+		if bal, err := b.statsProvider.GetBalance(); err == nil {
+			balanceStr = "$" + bal.StringFixed(2)
+		}
+	}
+
 	msg := fmt.Sprintf(`🚀 *POLYBOT STARTED*
 ━━━━━━━━━━━━━━━━━━━━
 
-🎯 Strategy: *Sniper V3*
+🎯 Strategy: *Sniper*
 📊 Mode: *%s*
-⏱️ Detection: *200ms*
+💰 Balance: *%s*
+⏱️ Detection: *100ms*
 
 ━━━━━━━━━━━━━━━━━━━━
 Entry: 88-93¢ | TP: 99¢ | SL: 70¢
-Time: Last 15-60 seconds
+Window: Last 15-60 seconds
 
-Use /help for commands`, mode)
+Use /help for commands`, mode, balanceStr)
 
 	b.sendMarkdown(msg)
 }
@@ -320,8 +334,12 @@ func (b *TelegramBot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdHelp()
 	case "status":
 		b.cmdStatus()
+	case "balance":
+		b.cmdBalance()
 	case "stats":
 		b.cmdStats()
+	case "trades":
+		b.cmdTrades()
 	case "positions":
 		b.cmdPositions()
 	case "pause":
@@ -340,14 +358,16 @@ func (b *TelegramBot) cmdHelp() {
 ━━━━━━━━━━━━━━━━━━━━
 
 📊 /status — Bot status
+� /balance — Account balance
 📈 /stats — Trading statistics
+📜 /trades — Last 10 trades
 💼 /positions — Open positions
 ⏸️ /pause — Pause trading
 ▶️ /resume — Resume trading
 🏓 /ping — Test connection
 
 ━━━━━━━━━━━━━━━━━━━━
-Sniper V3 — Last minute signals`
+Polybot Sniper — 100ms detection`
 
 	b.sendMarkdown(msg)
 }
@@ -359,17 +379,25 @@ func (b *TelegramBot) cmdStatus() {
 	}
 
 	status := "🟢 RUNNING"
-	// Could add pause state here
+
+	// Get balance if available
+	balanceStr := "N/A"
+	if b.statsProvider != nil {
+		if bal, err := b.statsProvider.GetBalance(); err == nil {
+			balanceStr = "$" + bal.StringFixed(2)
+		}
+	}
 
 	msg := fmt.Sprintf(`📊 *BOT STATUS*
 ━━━━━━━━━━━━━━━━━━━━
 
 %s
 📊 Mode: *%s*
-🎯 Strategy: *Sniper V3*
-⏱️ Detection: *200ms*
+💰 Balance: *%s*
+🎯 Strategy: *Sniper*
+⏱️ Detection: *100ms*
 
-Entry: 88-93¢ | TP: 99¢ | SL: 70¢`, status, mode)
+Entry: 88-93¢ | TP: 99¢ | SL: 70¢`, status, mode, balanceStr)
 
 	b.sendMarkdown(msg)
 }
@@ -412,8 +440,129 @@ func (b *TelegramBot) cmdStats() {
 }
 
 func (b *TelegramBot) cmdPositions() {
-	// Positions feature requires extended interface
-	b.send("📭 Position tracking available in next update")
+	if b.statsProvider == nil {
+		b.send("❌ Positions not available")
+		return
+	}
+
+	positions, err := b.statsProvider.GetOpenPositions()
+	if err != nil {
+		b.send("❌ Failed to fetch positions")
+		return
+	}
+
+	if len(positions) == 0 {
+		b.send("📭 No open positions")
+		return
+	}
+
+	msg := "💼 *OPEN POSITIONS*\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+	for i, pos := range positions {
+		sideEmoji := "🟢"
+		if pos.Side == "NO" {
+			sideEmoji = "🔴"
+		}
+		duration := time.Since(pos.OpenedAt).Round(time.Second)
+
+		msg += fmt.Sprintf(`%s *%s* — %s
+💵 Entry: %s¢ | Size: $%s
+🎯 TP: %s¢ | 🛑 SL: %s¢
+⏱️ Duration: %v
+
+`,
+			sideEmoji, pos.Asset, pos.Side,
+			pos.EntryPrice.Mul(decimal.NewFromInt(100)).StringFixed(1),
+			pos.Size.StringFixed(2),
+			pos.TakeProfit.Mul(decimal.NewFromInt(100)).StringFixed(1),
+			pos.StopLoss.Mul(decimal.NewFromInt(100)).StringFixed(1),
+			duration,
+		)
+
+		if i >= 4 {
+			msg += fmt.Sprintf("_... and %d more_", len(positions)-5)
+			break
+		}
+	}
+
+	b.sendMarkdown(msg)
+}
+
+func (b *TelegramBot) cmdBalance() {
+	if b.statsProvider == nil {
+		b.send("❌ Balance not available")
+		return
+	}
+
+	balance, err := b.statsProvider.GetBalance()
+	if err != nil {
+		b.send("❌ Failed to fetch balance")
+		return
+	}
+
+	msg := fmt.Sprintf(`💰 *ACCOUNT BALANCE*
+━━━━━━━━━━━━━━━━━━━━
+
+💵 Available: *$%s*
+
+Use /positions to see open trades`,
+		balance.StringFixed(2),
+	)
+
+	b.sendMarkdown(msg)
+}
+
+func (b *TelegramBot) cmdTrades() {
+	if b.statsProvider == nil {
+		b.send("❌ Trades not available")
+		return
+	}
+
+	trades, err := b.statsProvider.GetRecentTrades(10)
+	if err != nil {
+		b.send("❌ Failed to fetch trades")
+		return
+	}
+
+	if len(trades) == 0 {
+		b.send("📭 No trade history yet")
+		return
+	}
+
+	msg := "📜 *LAST 10 TRADES*\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+	for _, t := range trades {
+		actionEmoji := "📌"
+		switch t.Action {
+		case "OPEN":
+			actionEmoji = "✅"
+		case "TAKE_PROFIT":
+			actionEmoji = "💰"
+		case "STOP_LOSS":
+			actionEmoji = "🛑"
+		case "CLOSE":
+			actionEmoji = "📊"
+		}
+
+		pnlStr := ""
+		if !t.PnL.IsZero() {
+			sign := "+"
+			if t.PnL.IsNegative() {
+				sign = ""
+			}
+			pnlStr = fmt.Sprintf(" | P&L: %s$%s", sign, t.PnL.StringFixed(2))
+		}
+
+		timeStr := t.Timestamp.Format("Jan 2 15:04")
+
+		msg += fmt.Sprintf("%s %s %s %s @ %s¢%s\n   _%s_\n\n",
+			actionEmoji, t.Action, t.Asset, t.Side,
+			t.Price.Mul(decimal.NewFromInt(100)).StringFixed(1),
+			pnlStr, timeStr,
+		)
+	}
+
+	b.sendMarkdown(msg)
 }
 
 func (b *TelegramBot) cmdPause() {
