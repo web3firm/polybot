@@ -39,7 +39,7 @@ func main() {
 	}
 
 	log.Info().Msg("═══════════════════════════════════════════════════════════════")
-	log.Info().Msg("              POLYBOT v6.0 - SNIPER V3 EDITION")
+	log.Info().Msg("                    POLYBOT v6.0 - SNIPER")
 	log.Info().Msg("═══════════════════════════════════════════════════════════════")
 
 	// ═══════════════════════════════════════════════════════════════════════════════
@@ -79,16 +79,14 @@ func main() {
 	riskMgr := risk.NewManager()
 	log.Info().Msg("✅ Risk layer initialized")
 
-	// 7. Load strategies - SniperV3 is our main strategy
-	sniperV3 := strategy.NewSniperV3(binanceFeed, windowScanner)
-	strategies := []strategy.Strategy{
-		sniperV3,
-	}
-	log.Info().Int("count", len(strategies)).Msg("✅ Strategies loaded")
+	// 7. Sniper strategy
+	sniper := strategy.NewSniper(binanceFeed, windowScanner)
+	strategies := []strategy.Strategy{sniper}
+	log.Info().Msg("✅ Strategy loaded")
 
 	// 8. Core engine
 	engine := core.NewEngine(polyFeed, executor, riskMgr, strategies, db)
-	log.Info().Msg("✅ Core engine initialized")
+	log.Info().Msg("✅ Engine initialized")
 
 	// 9. Telegram bot (optional - fails gracefully if not configured)
 	var tgBot *bot.TelegramBot
@@ -97,57 +95,52 @@ func main() {
 	} else {
 		tgBot = tg
 		tgBot.Start()
-		log.Info().Msg("✅ Telegram bot initialized")
+		log.Info().Msg("✅ Telegram initialized")
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════════════
-	// PRINT CONFIG
+	// STATUS
 	// ═══════════════════════════════════════════════════════════════════════════════
 
+	mode := "LIVE"
+	if os.Getenv("DRY_RUN") == "true" {
+		mode = "PAPER"
+	}
+
 	log.Info().Msg("")
-	log.Info().Msg("╔══════════════════════════════════════════════════════════════╗")
-	log.Info().Msg("║           🎯 SNIPER V3 - LAST MINUTE CONFIRMED SIGNALS       ║")
-	log.Info().Msg("╠══════════════════════════════════════════════════════════════╣")
-	log.Info().Msgf("║  Mode: %-52s ║", func() string {
-		if os.Getenv("DRY_RUN") == "true" {
-			return "PAPER TRADING"
-		}
-		return "LIVE TRADING"
-	}())
-	log.Info().Msg("║  Assets: BTC, ETH, SOL                                       ║")
-	log.Info().Msg("║  Strategy: Sniper V3 (200ms detection)                       ║")
-	log.Info().Msg("║                                                              ║")
-	log.Info().Msg("║  Entry Zone: 88-93¢                                          ║")
-	log.Info().Msg("║  Take Profit: 99¢                                            ║")
-	log.Info().Msg("║  Stop Loss: 70¢                                              ║")
-	log.Info().Msg("║  Time Window: Last 15-60 seconds                             ║")
-	log.Info().Msg("║  Min Price Move: 0.10% (BTC/ETH), 0.15% (SOL)                ║")
-	log.Info().Msg("║                                                              ║")
-	log.Info().Msg("║  Logic: Buy nearly-confirmed winners in last minute          ║")
-	log.Info().Msg("╚══════════════════════════════════════════════════════════════╝")
+	log.Info().Msg("╔═══════════════════════════════════════╗")
+	log.Info().Msg("║           POLYBOT SNIPER              ║")
+	log.Info().Msg("╠═══════════════════════════════════════╣")
+	log.Info().Msgf("║  Mode:    %-27s ║", mode)
+	log.Info().Msg("║  Assets:  BTC, ETH, SOL               ║")
+	log.Info().Msg("║  Scan:    100ms                       ║")
+	log.Info().Msg("║  Entry:   88-93¢                      ║")
+	log.Info().Msg("║  TP/SL:   99¢ / 70¢                   ║")
+	log.Info().Msg("║  Window:  15-60 sec                   ║")
+	log.Info().Msg("╚═══════════════════════════════════════╝")
 	log.Info().Msg("")
 
 	// ═══════════════════════════════════════════════════════════════════════════════
 	// START
 	// ═══════════════════════════════════════════════════════════════════════════════
 
-	// Start engine (handles Polymarket ticks and position monitoring)
+	// Start engine
 	go engine.Start()
 
-	// Start SniperV3's 200ms detection loop
+	// Start sniper's fast scan loop
 	signalCh := make(chan *strategy.Signal, 100)
-	go sniperV3.RunLoop(signalCh)
+	go sniper.RunLoop(signalCh)
 
-	// Process signals from sniper
+	// Process signals
 	go func() {
-		for signal := range signalCh {
-			engine.ProcessSignal(signal, sniperV3.Name())
+		for sig := range signalCh {
+			engine.ProcessSignal(sig, sniper.Name())
 		}
 	}()
 
-	log.Info().Msg("🚀 All systems running...")
+	log.Info().Msg("🚀 Running...")
 
-	// Send Telegram startup notification
+	// Telegram startup
 	if tgBot != nil {
 		mode := "PAPER"
 		if os.Getenv("DRY_RUN") != "true" {
